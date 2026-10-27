@@ -54,6 +54,37 @@ fn grouped_display_keeps_secret_values_masked() {
 }
 
 #[test]
+fn imported_password_secrets_are_masked() {
+	let config = config_from_toml(
+		"[global.authentication]\nimported_bcrypt_pepper = \"sentinel-pepper\"\nimported_argon2_secret \
+		 = \"sentinel-secret\"\n",
+	)
+	.expect("imported password secrets extract");
+
+	assert_eq!(
+		config
+			.authentication
+			.imported_bcrypt_pepper
+			.as_deref(),
+		Some("sentinel-pepper")
+	);
+	assert_eq!(
+		config
+			.authentication
+			.imported_argon2_secret
+			.as_deref(),
+		Some("sentinel-secret")
+	);
+
+	let root = config.to_string();
+	let rendered = config.authentication.to_string();
+	for secret in ["sentinel-pepper", "sentinel-secret"] {
+		assert!(!rendered.contains(secret), "section leaked {secret}");
+		assert!(!root.contains(secret), "root leaked {secret}");
+	}
+}
+
+#[test]
 fn secret_file_references_are_not_materialized() {
 	if !isolated(
 		"config::tests::hierarchy::secrets::secret_file_references_are_not_materialized",
