@@ -55,6 +55,7 @@ use super::{
 };
 use crate::{ignored_filter, is_empty_account_data_event, with_membership};
 
+pub(super) mod fastpath;
 pub(super) mod notifications;
 
 pub(super) struct RoomMetadata {

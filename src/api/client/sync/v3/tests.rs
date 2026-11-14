@@ -12,7 +12,8 @@ use super::{
 		GateInputs, Gates as NotificationGates,
 		assemble_threads as assemble_thread_notifications,
 		assemble_unread as assemble_unread_notifications,
-		compute_gates as compute_notification_gates, in_window, send_thread_counts,
+		compute_gates as compute_notification_gates, in_window, quiet_counts_reported,
+		send_thread_counts,
 	},
 };
 
@@ -225,6 +226,93 @@ fn thread_totals_merge_only_without_opt_in() {
 	assert_eq!(merged.highlight_count, Some(uint!(1)));
 	assert_eq!(partitioned.notification_count, Some(uint!(3)));
 	assert_eq!(partitioned.highlight_count, Some(uint!(0)));
+}
+
+#[test]
+fn quiet_counts_stay_quiet_when_all_zero() {
+	let nonzero = |count: &UInt| *count != uint!(0);
+	let thread_counts = BTreeMap::new();
+
+	let reported = quiet_counts_reported(
+		Some(uint!(0)),
+		Some(uint!(0)),
+		Some(&thread_counts),
+		nonzero,
+		false,
+		|_: &OwnedEventId| false,
+	);
+
+	assert!(!reported);
+}
+
+#[test]
+fn quiet_counts_report_a_nonzero_room_count() {
+	let nonzero = |count: &UInt| *count != uint!(0);
+
+	let reported = quiet_counts_reported(
+		Some(uint!(1)),
+		Some(uint!(0)),
+		None,
+		nonzero,
+		false,
+		|_: &OwnedEventId| false,
+	);
+
+	assert!(reported);
+}
+
+#[test]
+fn quiet_counts_ignore_unadmitted_thread_counts() {
+	let nonzero = |count: &UInt| *count != uint!(0);
+	let root = EventId::parse("$thread:example.org").unwrap();
+	let thread_counts = BTreeMap::from([(root, (2, 1))]);
+
+	let reported = quiet_counts_reported(
+		Some(uint!(0)),
+		Some(uint!(0)),
+		Some(&thread_counts),
+		nonzero,
+		true,
+		|_: &OwnedEventId| false,
+	);
+
+	assert!(!reported);
+}
+
+#[test]
+fn quiet_counts_report_an_admitted_thread() {
+	let nonzero = |count: &UInt| *count != uint!(0);
+	let root = EventId::parse("$thread:example.org").unwrap();
+	let thread_counts = BTreeMap::from([(root.clone(), (0, 0))]);
+
+	let reported = quiet_counts_reported(
+		Some(uint!(0)),
+		Some(uint!(0)),
+		Some(&thread_counts),
+		nonzero,
+		true,
+		|candidate: &OwnedEventId| *candidate == root,
+	);
+
+	assert!(reported);
+}
+
+#[test]
+fn quiet_counts_merge_thread_totals_without_opt_in() {
+	let nonzero = |count: &UInt| *count != uint!(0);
+	let root = EventId::parse("$thread:example.org").unwrap();
+	let thread_counts = BTreeMap::from([(root, (2, 1))]);
+
+	let reported = quiet_counts_reported(
+		Some(uint!(0)),
+		Some(uint!(0)),
+		Some(&thread_counts),
+		nonzero,
+		false,
+		|_: &OwnedEventId| false,
+	);
+
+	assert!(reported);
 }
 
 fn notification_gates(

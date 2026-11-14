@@ -44,7 +44,7 @@ use tuwunel_service::{Services, presence::Ping, users::InviteFilter};
 use super::{
 	super::{invite_permitted, profiles::collect as collect_profiles, share_encrypted_room},
 	Since, StateAfter,
-	joined::load_room as load_joined_room,
+	joined::fastpath::{Tally, load_room_or_skip},
 	left::collect_rooms as collect_left_rooms,
 	log_future_since,
 };
@@ -495,7 +495,7 @@ fn collect_joined_rooms<'a>(
 		.ready_filter(|&room_id| filter.room.matches(room_id))
 		.map(ToOwned::to_owned)
 		.broad_filter_map(move |room_id| {
-			load_joined_room(
+			load_room_or_skip(
 				services,
 				sender_user,
 				sender_device,
@@ -506,22 +506,30 @@ fn collect_joined_rooms<'a>(
 				state_after,
 				filter,
 			)
-			.map_ok(move |(joined_room, dlu, jeu)| (room_id, joined_room, dlu, jeu))
+			.map_ok(move |(joined_room, dlu, jeu, verdict)| {
+				(room_id, joined_room, dlu, jeu, verdict)
+			})
 			.ok()
 		})
 		.ready_fold(
-			(BTreeMap::new(), HashSet::new(), HashSet::new()),
-			|(mut joined_rooms, mut device_list_updates, mut left_encrypted_users),
-			 (room_id, joined_room, dlu, leu)| {
+			(BTreeMap::new(), HashSet::new(), HashSet::new(), Tally::default()),
+			|(mut joined_rooms, mut device_list_updates, mut left_encrypted_users, mut tally),
+			 (room_id, joined_room, dlu, leu, verdict)| {
 				device_list_updates.extend(dlu);
 				left_encrypted_users.extend(leu);
+				tally.record(verdict);
 				if !joined_room.is_empty() {
 					joined_rooms.insert(room_id, joined_room);
 				}
 
-				(joined_rooms, device_list_updates, left_encrypted_users)
+				(joined_rooms, device_list_updates, left_encrypted_users, tally)
 			},
 		)
+		.map(move |(joined_rooms, device_list_updates, left_encrypted_users, tally)| {
+			tally.log(since, next_batch);
+
+			(joined_rooms, device_list_updates, left_encrypted_users)
+		})
 }
 
 async fn collect_invited_rooms<'a>(

@@ -160,6 +160,31 @@ where
 	reported || thread_roots.into_iter().any(admitted)
 }
 
+pub(in super::super) fn quiet_counts_reported(
+	notification_count: Option<UInt>,
+	highlight_count: Option<UInt>,
+	thread_counts: Option<&ThreadCounts>,
+	send_notification_count_filter: impl Fn(&UInt) -> bool,
+	want_thread_unread: bool,
+	admitted: impl Fn(&OwnedEventId) -> bool,
+) -> bool {
+	let unread = assemble_unread(
+		notification_count,
+		highlight_count,
+		thread_counts,
+		send_notification_count_filter,
+		want_thread_unread,
+	);
+
+	!unread.is_empty()
+		|| (want_thread_unread
+			&& send_thread_counts(
+				false,
+				thread_counts.into_iter().flat_map(BTreeMap::keys),
+				admitted,
+			))
+}
+
 /// MSC3773 per-thread counts for a room the round reports.
 ///
 /// Clients read a thread missing from the map as having no notifications
