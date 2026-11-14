@@ -157,13 +157,24 @@ async fn matcher(
 			return ActivityProbe::default();
 		}
 
-		let result = services
+		let cached = services
 			.timeline
-			.last_timeline_count(None, &room_id, Some(conn.next_batch.into()))
-			.await
-			.map(PduCount::into_unsigned);
+			.last_normal_count(&room_id)
+			.await;
 
-		activity_probe(result, &room_id, "timeline", false)
+		match cached.map(|count| timeline_source(count, conn.next_batch)) {
+			| Ok(TimelineSource::Cached(count)) => ActivityProbe { count, failed: false },
+			| Ok(TimelineSource::Walk) => {
+				let result = services
+					.timeline
+					.last_timeline_count(None, &room_id, Some(conn.next_batch.into()))
+					.await
+					.map(PduCount::into_unsigned);
+
+				activity_probe(result, &room_id, "timeline", false)
+			},
+			| Err(error) => activity_probe(Err(error), &room_id, "timeline", false),
+		}
 	};
 
 	let last_membership = async {
@@ -263,6 +274,19 @@ fn activity_counts(
 	};
 
 	(event_count, payload_count)
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum TimelineSource {
+	Cached(Option<u64>),
+	Walk,
+}
+
+fn timeline_source(last_normal: Option<u64>, next_batch: u64) -> TimelineSource {
+	match last_normal {
+		| Some(count) if count > next_batch => TimelineSource::Walk,
+		| count => TimelineSource::Cached(count),
+	}
 }
 
 fn activity_probe(
@@ -479,11 +503,30 @@ mod tests {
 	};
 
 	use super::{
-		ActivityCounts, ListIds, WindowRoom, activity_counts, detached_room, response_lists,
-		room_sort, select_list_range,
+		ActivityCounts, ListIds, TimelineSource, WindowRoom, activity_counts, detached_room,
+		response_lists, room_sort, select_list_range, timeline_source,
 	};
 
 	const NEXT_BATCH: u64 = 10;
+
+	#[test]
+	fn timeline_source_uses_cache_within_the_bound() {
+		assert_eq!(timeline_source(Some(7), NEXT_BATCH), TimelineSource::Cached(Some(7)));
+		assert_eq!(
+			timeline_source(Some(NEXT_BATCH), NEXT_BATCH),
+			TimelineSource::Cached(Some(NEXT_BATCH))
+		);
+	}
+
+	#[test]
+	fn timeline_source_walks_when_newer_than_the_bound() {
+		assert_eq!(timeline_source(Some(NEXT_BATCH + 1), NEXT_BATCH), TimelineSource::Walk);
+	}
+
+	#[test]
+	fn timeline_source_treats_empty_timeline_as_cached_none() {
+		assert_eq!(timeline_source(None, NEXT_BATCH), TimelineSource::Cached(None));
+	}
 
 	#[test]
 	fn notification_activity_refreshes_payload_without_reordering() {
