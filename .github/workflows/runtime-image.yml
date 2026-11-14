@@ -1,0 +1,69 @@
+name: Runtime image
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch or tag to build
+        required: true
+        type: string
+        default: master
+  push:
+    tags:
+      - "runtime-v*"
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/globalartinc/tuwunel
+
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: sha
+        run: echo "sha7=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+
+      - id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/Dockerfile.runtime
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.IMAGE }}:2.0.0-bcrypt-${{ steps.sha.outputs.sha7 }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Check binary
+        env:
+          TAG: ${{ env.IMAGE }}:2.0.0-bcrypt-${{ steps.sha.outputs.sha7 }}
+        run: |
+          docker run --rm "$TAG" --version
+          docker run --rm "$TAG" --help | grep -- --restore-backup
+
+      - name: Summary
+        env:
+          TAG: ${{ env.IMAGE }}:2.0.0-bcrypt-${{ steps.sha.outputs.sha7 }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          {
+            echo "### tuwunel runtime image"
+            echo "- Tag: \`$TAG\`"
+            echo "- Digest: \`$DIGEST\`"
+          } >> "$GITHUB_STEP_SUMMARY"
