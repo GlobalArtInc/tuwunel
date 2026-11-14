@@ -5754,6 +5754,7 @@ dependencies = [
  "http-body-util",
  "ipnet",
  "log",
+ "pin-project-lite",
  "ruma",
  "rustls",
  "sd-notify",

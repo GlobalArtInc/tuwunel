@@ -2,6 +2,7 @@
 
 mod handle;
 mod layers;
+mod metrics;
 mod request;
 mod router;
 mod run;

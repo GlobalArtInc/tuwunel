@@ -111,6 +111,7 @@ http.workspace = true
 http-body-util.workspace = true
 ipnet.workspace = true
 log.workspace = true
+pin-project-lite.workspace = true
 ruma.workspace = true
 rustls.workspace = true
 rustls.optional = true

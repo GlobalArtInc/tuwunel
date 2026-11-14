@@ -8,9 +8,10 @@ use http::{
 use ipnet::IpNet;
 use tower::util::Either;
 use tuwunel_api::router::{ConfiguredIpSource, TrustedPeerSubnets};
-use tuwunel_core::config::IpSource;
+use tuwunel_core::config::{Figment, IpSource};
 
-use super::{ip_source_layer, set_html_headers, trusted_peer_subnets_layer};
+use super::{ip_source_layer, metrics_layer, set_html_headers, trusted_peer_subnets_layer};
+use crate::test_server::server;
 
 #[test]
 fn ip_source_layer_none_returns_identity_branch() {
@@ -92,4 +93,23 @@ fn html_headers_for(content_type: &str) -> HeaderMap {
 		.expect("the response builds");
 
 	set_html_headers(response).headers().clone()
+}
+
+#[test]
+fn metrics_layer_exists_only_when_metrics_are_enabled_and_ready() {
+	let enabled = || Figment::new().merge(("metrics.enable", true));
+
+	let off = server(Figment::new());
+	off.metrics.enable_prometheus();
+
+	assert!(metrics_layer(&off).is_none(), "disabled in the configuration");
+
+	let unready = server(enabled());
+
+	assert!(metrics_layer(&unready).is_none(), "the registry was not turned on");
+
+	let on = server(enabled());
+	on.metrics.enable_prometheus();
+
+	assert!(metrics_layer(&on).is_some());
 }

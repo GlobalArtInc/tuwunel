@@ -46,7 +46,7 @@ use tuwunel_core::{
 };
 use tuwunel_service::Services;
 
-use crate::{request, router};
+use crate::{metrics::MetricsLayer, request, router};
 
 type Convert = fn(Result<Response, StatusCode>) -> Result<Response, Infallible>;
 
@@ -106,6 +106,7 @@ pub(crate) fn build(services: &Arc<Services>) -> Result<(Router, Guard)> {
 				.on_request(DefaultOnRequest::new().level(Level::TRACE))
 				.on_response(DefaultOnResponse::new().level(Level::DEBUG)),
 		)
+		.option_layer(metrics_layer(server))
 		.layer(HandleLayer {
 			services: Arc::clone(services),
 			handler: request::handle,
@@ -206,6 +207,11 @@ pub(crate) fn compression_layer(server: &Server) -> tower_http::compression::Com
 	};
 
 	compression_layer
+}
+
+fn metrics_layer(server: &Server) -> Option<MetricsLayer> {
+	(server.config.metrics.enable && server.metrics.prometheus().is_some())
+		.then(|| MetricsLayer::new(Arc::clone(&server.metrics)))
 }
 
 fn cors_layer(server: &Server) -> CorsLayer {

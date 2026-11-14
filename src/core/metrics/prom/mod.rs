@@ -7,6 +7,7 @@
 //! text format is Prometheus 0.0.4.
 
 mod family;
+mod http;
 mod meta;
 #[cfg(test)]
 mod tests;
@@ -15,6 +16,7 @@ mod write;
 
 pub use self::{
 	family::{DynFamily, EnumFamily, LabelSet, MAX_KEY_LEN, OTHER},
+	http::{Api, Http, InFlight, Method, ROUTE_CAP, StatusClass, UNMATCHED},
 	meta::Meta,
 	types::{Counter, Gauge, Histogram, Metric, Timer},
 	write::{Kind, Le, Scale, Value, Writer, push_label},
@@ -28,10 +30,12 @@ pub const CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
 /// Names, buckets and rendering of every metric are defined under this module
 /// and nowhere else; the rest of the code only calls methods of the groups.
 #[derive(Debug, Default)]
-#[expect(missing_copy_implementations)]
 pub struct Registry {
 	/// Build information and registry bookkeeping.
 	pub meta: Meta,
+
+	/// Requests served over HTTP.
+	pub http: Http,
 }
 
 impl Registry {
@@ -44,6 +48,7 @@ impl Registry {
 	pub fn render(&self) -> String {
 		let mut w = Writer::new();
 		Meta::write(&mut w);
+		self.http.write(&mut w);
 
 		w.finish()
 	}
@@ -54,5 +59,5 @@ impl Registry {
 	/// Closed families count every value of their label set, open families
 	/// count their ceiling plus `_other`, and a histogram counts its buckets,
 	/// `+Inf`, sum and count.
-	pub fn max_series(&self) -> usize { Meta::series() }
+	pub fn max_series(&self) -> usize { Meta::series().saturating_add(self.http.series()) }
 }
