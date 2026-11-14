@@ -1,4 +1,8 @@
-use std::ops::Range;
+use std::{
+	ops::Range,
+	sync::{Arc, Mutex, PoisonError},
+	time::{Duration, Instant},
+};
 
 use axum::extract::State;
 use futures::StreamExt;
@@ -19,7 +23,7 @@ use tuwunel_core::{
 use crate::{Ruma, require_admin};
 
 /// The `deactivated` query filter, whose semantics differ between v2 and v3.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 enum DeactivatedFilter {
 	/// Include both active and deactivated users (v3 absent).
 	Any,
@@ -56,6 +60,79 @@ struct ListParams<'a> {
 	locked: bool,
 	deactivated: DeactivatedFilter,
 	dir: Direction,
+}
+
+const LIST_TTL: Duration = Duration::from_secs(5);
+
+const LIST_KEYS: usize = 8;
+
+static LIST_CACHE: Mutex<ListCache> = Mutex::new(ListCache::new());
+
+#[derive(Clone, Eq, PartialEq)]
+struct ListKey {
+	owner: usize,
+	backward: bool,
+	name: Option<String>,
+	user_id: Option<String>,
+	admins: Option<bool>,
+	locked: bool,
+	deactivated: DeactivatedFilter,
+}
+
+struct ListCache {
+	entries: Vec<(ListKey, Instant, Arc<[String]>)>,
+}
+
+impl ListKey {
+	fn new(services: crate::State, params: &ListParams<'_>) -> Self {
+		Self {
+			owner: std::ptr::from_ref(&*services).addr(),
+			backward: matches!(params.dir, Direction::Backward),
+			name: params.name.map(ToOwned::to_owned),
+			user_id: params.user_id.map(ToOwned::to_owned),
+			admins: params.admins,
+			locked: params.locked,
+			deactivated: params.deactivated,
+		}
+	}
+}
+
+impl ListCache {
+	const fn new() -> Self { Self { entries: Vec::new() } }
+
+	fn get(&mut self, key: &ListKey, now: Instant) -> Option<Arc<[String]>> {
+		self.entries
+			.retain(|(_, stored, _)| now.saturating_duration_since(*stored) < LIST_TTL);
+
+		self.entries
+			.iter()
+			.find(|(cached, ..)| cached == key)
+			.map(|(.., names)| names.clone())
+	}
+
+	fn put(&mut self, key: ListKey, names: Arc<[String]>, now: Instant) {
+		self.entries.retain(|(cached, ..)| *cached != key);
+
+		if self.entries.len() >= LIST_KEYS {
+			self.entries.remove(0);
+		}
+
+		self.entries.push((key, now, names));
+	}
+}
+
+fn cached_names(key: &ListKey) -> Option<Arc<[String]>> {
+	LIST_CACHE
+		.lock()
+		.unwrap_or_else(PoisonError::into_inner)
+		.get(key, Instant::now())
+}
+
+fn cache_names(key: ListKey, names: Arc<[String]>) {
+	LIST_CACHE
+		.lock()
+		.unwrap_or_else(PoisonError::into_inner)
+		.put(key, names, Instant::now());
 }
 
 /// # `GET /_synapse/admin/v2/users`
@@ -123,6 +200,33 @@ async fn list_users(
 	services: crate::State,
 	params: &ListParams<'_>,
 ) -> (Vec<UserMinorDetails>, Option<String>, UInt) {
+	let key = ListKey::new(services, params);
+	let matched = match cached_names(&key) {
+		| Some(matched) => matched,
+		| None => {
+			let matched: Arc<[String]> = matching_names(services, params).await.into();
+
+			cache_names(key, matched.clone());
+
+			matched
+		},
+	};
+
+	let total = ruma_from_usize(matched.len());
+	let (window, next_token) = page_window(matched.len(), params.from, params.limit);
+
+	let page: Vec<UserMinorDetails> = matched[window]
+		.iter()
+		.map(String::as_str)
+		.stream()
+		.wide_filter_map(async |name| user_minor_details(services, name).await)
+		.collect()
+		.await;
+
+	(page, next_token, total)
+}
+
+async fn matching_names(services: crate::State, params: &ListParams<'_>) -> Vec<String> {
 	let mut names: Vec<String> = services
 		.users
 		.stream()
@@ -133,30 +237,17 @@ async fn list_users(
 
 	order_names(&mut names, params.dir);
 
-	let matched: Vec<&str> = names
+	names
 		.iter()
 		.map(String::as_str)
 		.stream()
 		.wide_filter_map(async |name| {
 			user_matches(services, name, params)
 				.await
-				.then_some(name)
+				.then(|| name.to_owned())
 		})
 		.collect()
-		.await;
-
-	let total = ruma_from_usize(matched.len());
-	let (window, next_token) = page_window(matched.len(), params.from, params.limit);
-
-	let page: Vec<UserMinorDetails> = matched[window]
-		.iter()
-		.copied()
-		.stream()
-		.wide_filter_map(async |name| user_minor_details(services, name).await)
-		.collect()
-		.await;
-
-	(page, next_token, total)
+		.await
 }
 
 fn order_names(names: &mut [String], dir: Direction) {
@@ -274,9 +365,16 @@ async fn user_minor_details(services: crate::State, name: &str) -> Option<UserMi
 
 #[cfg(test)]
 mod tests {
+	use std::{
+		sync::Arc,
+		time::{Duration, Instant},
+	};
+
 	use ruma::api::Direction;
 
-	use super::{DeactivatedFilter, order_names, page_window};
+	use super::{
+		DeactivatedFilter, LIST_KEYS, LIST_TTL, ListCache, ListKey, order_names, page_window,
+	};
 
 	#[test]
 	fn first_page_has_next_token() {
@@ -336,5 +434,96 @@ mod tests {
 		assert_eq!(keeps(DeactivatedFilter::Include), (true, true, false));
 		assert_eq!(keeps(DeactivatedFilter::Only), (false, true, true));
 		assert_eq!(keeps(DeactivatedFilter::Exclude), (true, false, true));
+	}
+
+	fn key(name: &str) -> ListKey {
+		ListKey {
+			owner: 1,
+			backward: false,
+			name: Some(name.to_owned()),
+			user_id: None,
+			admins: None,
+			locked: false,
+			deactivated: DeactivatedFilter::Exclude,
+		}
+	}
+
+	fn names(name: &str) -> Arc<[String]> { Arc::from([name.to_owned()]) }
+
+	#[test]
+	fn cached_names_expire_with_the_ttl() {
+		let start = Instant::now();
+		let mut cache = ListCache::new();
+
+		cache.put(key("a"), names("@a:x"), start);
+
+		let almost = start + LIST_TTL.saturating_sub(Duration::from_millis(1));
+
+		assert_eq!(cache.get(&key("a"), almost).as_deref(), Some(&["@a:x".to_owned()][..]));
+		assert!(cache.get(&key("a"), start + LIST_TTL).is_none());
+		assert!(cache.entries.is_empty());
+	}
+
+	#[test]
+	fn cache_keeps_only_the_newest_keys() {
+		let start = Instant::now();
+		let mut cache = ListCache::new();
+
+		for index in 0..=LIST_KEYS {
+			cache.put(key(&index.to_string()), names("@a:x"), start);
+		}
+
+		assert_eq!(cache.entries.len(), LIST_KEYS);
+		assert!(cache.get(&key("0"), start).is_none());
+		assert!(cache.get(&key("1"), start).is_some());
+		assert!(
+			cache
+				.get(&key(&LIST_KEYS.to_string()), start)
+				.is_some()
+		);
+	}
+
+	#[test]
+	fn storing_a_key_again_replaces_its_entry() {
+		let start = Instant::now();
+		let mut cache = ListCache::new();
+
+		cache.put(key("a"), names("@old:x"), start);
+		cache.put(key("a"), names("@new:x"), start);
+
+		assert_eq!(cache.entries.len(), 1);
+		assert_eq!(cache.get(&key("a"), start).as_deref(), Some(&["@new:x".to_owned()][..]));
+	}
+
+	#[test]
+	fn every_filter_separates_the_cached_list() {
+		let base = key("a");
+		let changed = [
+			ListKey { owner: 2, ..base.clone() },
+			ListKey { backward: true, ..base.clone() },
+			ListKey { name: None, ..base.clone() },
+			ListKey {
+				user_id: Some("a".to_owned()),
+				..base.clone()
+			},
+			ListKey { admins: Some(true), ..base.clone() },
+			ListKey { locked: true, ..base.clone() },
+			ListKey {
+				deactivated: DeactivatedFilter::Only,
+				..base.clone()
+			},
+		];
+
+		let start = Instant::now();
+		let mut cache = ListCache::new();
+
+		cache.put(base.clone(), names("@a:x"), start);
+
+		for other in &changed {
+			assert!(*other != base);
+			assert!(cache.get(other, start).is_none());
+		}
+
+		assert!(cache.get(&base, start).is_some());
 	}
 }
