@@ -402,7 +402,7 @@ async fn verify_password(
 	let verified = OptionFuture::from(stored_hash.map(async |hash| {
 		self.services
 			.users
-			.verify_and_upgrade_password(&user_id, password, &hash)
+			.verify_and_upgrade_password(user_id, password, &hash)
 			.await
 			.is_ok()
 	}))

@@ -56,8 +56,8 @@ fn grouped_display_keeps_secret_values_masked() {
 #[test]
 fn imported_password_secrets_are_masked() {
 	let config = config_from_toml(
-		"[global.authentication]\nimported_bcrypt_pepper = \"sentinel-pepper\"\nimported_argon2_secret \
-		 = \"sentinel-secret\"\n",
+		"[global.authentication]\nimported_bcrypt_pepper = \
+		 \"sentinel-pepper\"\nimported_argon2_secret = \"sentinel-secret\"\n",
 	)
 	.expect("imported password secrets extract");
 

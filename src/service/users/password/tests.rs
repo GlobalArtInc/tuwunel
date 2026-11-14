@@ -90,6 +90,31 @@ async fn bcrypt_login_upgrades_to_argon2id() -> Result {
 }
 
 #[tokio::test]
+async fn bcrypt_check_on_the_blocking_pool_accepts_and_rejects() -> Result {
+	let config = Figment::new().merge(("authentication.imported_bcrypt_pepper", "pepper"));
+	let Some(fixture) = fixture(config).await? else {
+		return Ok(());
+	};
+
+	let users = &fixture.services.users;
+	let user_id = user_id!("@blocking:localhost");
+	imported_user(&fixture.services, user_id, LIGATURE_PEPPERED).await?;
+
+	users
+		.verify_and_upgrade_password(user_id, "fix\u{0301}wrong", LIGATURE_PEPPERED)
+		.await
+		.expect_err("wrong password rejected");
+	assert_eq!(users.password_hash(user_id).await?, LIGATURE_PEPPERED);
+
+	users
+		.verify_and_upgrade_password(user_id, "fix\u{0301}", LIGATURE_PEPPERED)
+		.await?;
+	assert!(!is_bcrypt_hash(&users.password_hash(user_id).await?));
+
+	Ok(())
+}
+
+#[tokio::test]
 async fn bcrypt_login_uses_synapse_pepper() -> Result {
 	let config = Figment::new().merge(("authentication.imported_bcrypt_pepper", "pepper"));
 	let Some(fixture) = fixture(config).await? else {

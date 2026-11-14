@@ -26,8 +26,13 @@ pub fn is_bcrypt_hash(hash: &str) -> bool {
 ///
 /// Synapse NFKC-normalizes the password and appends its configured pepper
 /// before hashing, and bcrypt reads only the first 72 bytes of the result.
-/// Malformed hashes and password mismatches return an error.
+/// Hashes that `is_bcrypt_hash` refuses, malformed hashes and password
+/// mismatches return an error.
 pub fn verify_bcrypt_password(password: &str, pepper: &str, hash: &str) -> Result {
+	if !is_bcrypt_hash(hash) {
+		return Err(err!("Not a bcrypt hash this server verifies."));
+	}
+
 	let normalized = ComposingNormalizerBorrowed::new_nfkc().normalize(password);
 	let peppered = [normalized.as_bytes(), pepper.as_bytes()].concat();
 
@@ -68,6 +73,17 @@ mod tests {
 	fn verifies_a_synapse_hash() {
 		verify_bcrypt_password("temp123", "", TEMP123).expect("verified");
 		verify_bcrypt_password("temp321", "", TEMP123).expect_err("unverified");
+	}
+
+	#[test]
+	fn verification_refuses_2x_and_excessive_cost() {
+		let x2 = TEMP123.replacen("$2b$", "$2x$", 1);
+		let cost17 = TEMP123.replacen("$04$", "$17$", 1);
+
+		verify_bcrypt_password("temp123", "", &x2).expect_err("$2x$ refused");
+		verify_bcrypt_password("temp123", "", &cost17).expect_err("cost 17 refused");
+		verify_bcrypt_password("temp123", "", &TEMP123.replacen("$2b$", "$2y$", 1))
+			.expect("$2y$ verified");
 	}
 
 	#[test]

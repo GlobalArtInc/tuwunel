@@ -1,6 +1,6 @@
 use ruma::UserId;
 use tuwunel_core::{
-	Err, Result, implement,
+	Err, Result, err, implement,
 	utils::hash::{
 		is_argon2_hash, is_bcrypt_hash, is_keyed_argon2_hash, password as hash_password,
 		verify_bcrypt_password, verify_password, verify_password_with_secret,
@@ -32,7 +32,16 @@ pub async fn verify_and_upgrade_password(
 			.as_deref()
 			.unwrap_or_default();
 
-		verify_bcrypt_password(password, pepper, hash)?;
+		let (password, pepper, hash) = (password.to_owned(), pepper.to_owned(), hash.to_owned());
+
+		self.services
+			.server
+			.runtime()
+			.spawn_blocking(move || verify_bcrypt_password(&password, &pepper, &hash))
+			.await
+			.map_err(|e| {
+				err!("The bcrypt verification task failed (panicked: {}).", e.is_panic())
+			})??;
 	} else if is_keyed_argon2_hash(hash) {
 		let Some(secret) = config
 			.authentication
@@ -40,7 +49,8 @@ pub async fn verify_and_upgrade_password(
 			.as_deref()
 		else {
 			return Err!(
-				"A keyed password hash needs authentication.imported_argon2_secret, which is unset."
+				"A keyed password hash needs authentication.imported_argon2_secret, which is \
+				 unset."
 			);
 		};
 

@@ -101,7 +101,7 @@ version = "0.22"
 default-features = false
 
 [workspace.dependencies.bcrypt]
-version = "0.19"
+version = "0.19.2"
 default-features = false
 features = ["alloc", "zeroize"]
 
