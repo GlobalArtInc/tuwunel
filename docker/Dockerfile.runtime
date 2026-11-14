@@ -1,0 +1,26 @@
+FROM docker.io/library/rust:1.95-bookworm AS build
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends clang libclang-dev liburing-dev cmake pkg-config make git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY . .
+
+ENV CARGO_PROFILE_RELEASE_LTO=false
+RUN cargo build --release --locked
+
+FROM docker.io/library/debian:bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates liburing2 libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /src/target/release/tuwunel /usr/local/bin/tuwunel
+
+USER 1000:1000
+ENTRYPOINT ["tuwunel"]
+
+LABEL org.opencontainers.image.source="https://github.com/GlobalArtInc/tuwunel-synapse-import" \
+      org.opencontainers.image.description="Tuwunel 2.0.0 with bcrypt password hash support for imported Synapse accounts" \
+      org.opencontainers.image.licenses="Apache-2.0"
