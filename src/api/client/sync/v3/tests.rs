@@ -65,7 +65,7 @@ fn since_non_numeric_token_is_foreign() {
 
 #[test]
 fn busy_round_delivers_reset_zeros() {
-	let gates = notification_gates(Some(150), &no_threads(), false, SINCE);
+	let gates = notification_gates(Some(150), &no_threads(), false, true, SINCE);
 
 	assert!(gates.send_notification_counts);
 	assert!((gates.send_notification_count_filter)(&uint!(0)));
@@ -74,7 +74,7 @@ fn busy_round_delivers_reset_zeros() {
 #[test]
 fn busy_round_without_reset_suppresses_zeros() {
 	// A cursor at 50 advanced before this window, so it is not a reset.
-	let gates = notification_gates(Some(50), &no_threads(), false, SINCE);
+	let gates = notification_gates(Some(50), &no_threads(), false, true, SINCE);
 
 	assert!(gates.send_notification_counts);
 	assert!(!(gates.send_notification_count_filter)(&uint!(0)));
@@ -83,7 +83,7 @@ fn busy_round_without_reset_suppresses_zeros() {
 
 #[test]
 fn busy_round_without_cursor_sends_counts() {
-	let gates = notification_gates(None, &no_threads(), false, SINCE);
+	let gates = notification_gates(None, &no_threads(), false, true, SINCE);
 
 	assert!(gates.send_notification_counts);
 	assert!(!(gates.send_notification_count_filter)(&uint!(0)));
@@ -91,7 +91,7 @@ fn busy_round_without_cursor_sends_counts() {
 
 #[test]
 fn quiet_round_with_advanced_cursor_sends_zeros() {
-	let gates = notification_gates(Some(150), &no_threads(), true, SINCE);
+	let gates = notification_gates(Some(150), &no_threads(), true, false, SINCE);
 
 	assert!(gates.send_notification_counts);
 	assert!((gates.send_notification_count_filter)(&uint!(0)));
@@ -100,35 +100,61 @@ fn quiet_round_with_advanced_cursor_sends_zeros() {
 #[test]
 fn quiet_round_with_stale_cursor_sends_nothing() {
 	// A cursor at 50 advanced before this window, so nothing changed.
-	let gates = notification_gates(Some(50), &no_threads(), true, SINCE);
+	let gates = notification_gates(Some(50), &no_threads(), true, false, SINCE);
 
 	assert!(!gates.send_notification_counts);
 	assert!(!(gates.send_notification_count_filter)(&uint!(0)));
 }
 
 #[test]
-fn quiet_round_without_cursor_suppresses_zeros() {
-	let gates = notification_gates(None, &no_threads(), true, SINCE);
+fn quiet_round_without_cursor_or_timeline_sends_nothing() {
+	let gates = notification_gates(None, &no_threads(), true, false, SINCE);
+
+	assert!(!gates.send_notification_counts);
+	assert!(!(gates.send_notification_count_filter)(&uint!(0)));
+	assert!((gates.send_notification_count_filter)(&uint!(5)));
+}
+
+#[test]
+fn quiet_round_without_cursor_after_filtered_timeline_sends_counts() {
+	let gates = notification_gates(None, &no_threads(), true, true, SINCE);
 
 	assert!(gates.send_notification_counts);
 	assert!(!(gates.send_notification_count_filter)(&uint!(0)));
 }
 
 #[test]
+fn quiet_round_with_cursor_in_window_ignores_timeline() {
+	let unchanged = notification_gates(Some(150), &no_threads(), true, false, SINCE);
+	let changed = notification_gates(Some(150), &no_threads(), true, true, SINCE);
+
+	assert!(unchanged.send_notification_counts);
+	assert!(changed.send_notification_counts);
+}
+
+#[test]
 fn initial_sync_delivers_reset_zeros() {
 	// A client can start a fresh token while still caching a count, so an
 	// initial round must be able to reconcile it.
-	let gates = notification_gates(Some(150), &no_threads(), false, INITIAL_SINCE);
+	let gates = notification_gates(Some(150), &no_threads(), false, true, INITIAL_SINCE);
 
 	assert!(gates.send_notification_counts);
 	assert!((gates.send_notification_count_filter)(&uint!(0)));
 }
 
 #[test]
+fn initial_sync_without_cursor_sends_counts() {
+	let gates = notification_gates(None, &no_threads(), true, true, INITIAL_SINCE);
+
+	assert!(gates.send_notification_counts);
+	assert!((gates.send_notification_count_filter)(&uint!(5)));
+}
+
+#[test]
 fn cursor_past_the_cutoff_delivers_reset_zeros() {
 	// The response cutoff is captured before the cursor is read, so a
 	// cursor beyond it repeats the zero until the token catches up.
-	let gates = notification_gates(Some(NEXT_BATCH + 1), &no_threads(), false, SINCE);
+	let gates = notification_gates(Some(NEXT_BATCH + 1), &no_threads(), false, true, SINCE);
 
 	assert!(gates.send_notification_counts);
 	assert!((gates.send_notification_count_filter)(&uint!(0)));
@@ -139,7 +165,7 @@ fn thread_only_reset_delivers_zeros() {
 	let root = EventId::parse("$thread:example.org").unwrap();
 	let thread_reads = BTreeMap::from([(root, 150)]);
 
-	let gates = notification_gates(None, &thread_reads, false, SINCE);
+	let gates = notification_gates(None, &thread_reads, false, true, SINCE);
 
 	assert!(gates.send_notification_counts);
 	assert!((gates.send_notification_count_filter)(&uint!(0)));
@@ -205,6 +231,7 @@ fn notification_gates(
 	last_read: Option<u64>,
 	thread_reads: &BTreeMap<OwnedEventId, u64>,
 	quiet_round: bool,
+	timeline_changed: bool,
 	since: u64,
 ) -> NotificationGates<impl Fn(&UInt) -> bool + use<>> {
 	compute_notification_gates(
@@ -212,6 +239,7 @@ fn notification_gates(
 			last_notification_read: last_read,
 			thread_last_reads: thread_reads,
 			quiet_round,
+			timeline_changed,
 			since,
 		},
 		in_window(since, NEXT_BATCH),

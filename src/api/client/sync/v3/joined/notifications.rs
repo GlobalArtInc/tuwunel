@@ -14,6 +14,7 @@ pub(in super::super) struct GateInputs<'a> {
 	pub(in super::super) last_notification_read: Option<u64>,
 	pub(in super::super) thread_last_reads: &'a BTreeMap<OwnedEventId, u64>,
 	pub(in super::super) quiet_round: bool,
+	pub(in super::super) timeline_changed: bool,
 	pub(in super::super) since: u64,
 }
 
@@ -79,6 +80,7 @@ pub(in super::super) fn compute_gates<F: Fn(u64) -> bool>(
 		last_notification_read,
 		thread_last_reads,
 		quiet_round,
+		timeline_changed,
 		since,
 	}: GateInputs<'_>,
 	in_window: F,
@@ -86,7 +88,7 @@ pub(in super::super) fn compute_gates<F: Fn(u64) -> bool>(
 	// Thread-only resets leave the main cursor alone, so without the thread leg
 	// a quiet round would never report them.
 	let send_notification_counts = !quiet_round
-		|| last_notification_read.is_none_or(&in_window)
+		|| last_notification_read.map_or(timeline_changed, &in_window)
 		|| thread_last_reads
 			.values()
 			.copied()

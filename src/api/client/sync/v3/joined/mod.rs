@@ -245,6 +245,7 @@ pub(super) async fn load_room(
 			last_notification_read,
 			thread_last_reads: &thread_last_reads,
 			quiet_round,
+			timeline_changed: timeline_changed || full_state,
 			since,
 		},
 		in_window,
