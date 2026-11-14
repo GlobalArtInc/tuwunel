@@ -45,6 +45,7 @@ fn state_after_selects_unstable_when_both_opted_in() {
 #[test]
 fn since_without_token_is_initial() {
 	assert_eq!(Since::from(None), Since::Initial);
+	assert_eq!(Since::from(Some("")), Since::Initial);
 }
 
 #[test]
@@ -58,7 +59,6 @@ fn since_numeric_token_is_count() {
 fn since_non_numeric_token_is_foreign() {
 	assert_eq!(Since::from(Some("s462025_2419382_0_94074")), Since::Foreign);
 	assert_eq!(Since::from(Some("garbage")), Since::Foreign);
-	assert_eq!(Since::from(Some("")), Since::Foreign);
 	assert_eq!(Since::from(Some("-5")), Since::Foreign);
 	assert_eq!(Since::from(Some("18446744073709551616")), Since::Foreign);
 }

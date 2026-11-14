@@ -81,7 +81,10 @@ enum Since {
 
 impl From<Option<&str>> for Since {
 	fn from(since: Option<&str>) -> Self {
-		match since.map(str::parse) {
+		match since
+			.filter(|since| !since.is_empty())
+			.map(str::parse)
+		{
 			| None => Self::Initial,
 			| Some(Ok(count)) => Self::Count(count),
 			| Some(Err(_)) => Self::Foreign,

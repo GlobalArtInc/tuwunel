@@ -202,6 +202,49 @@ async fn unused_fallback_keys_stay_with_their_device() -> Result {
 }
 
 #[tokio::test]
+async fn to_device_events_up_to_a_batch_survive_until_it_is_acknowledged() -> Result {
+	let Some(fixture) = fixture(Figment::new()).await? else {
+		return Ok(());
+	};
+
+	let services = &fixture.services;
+	let users = &services.users;
+	let sender = user_id!("@sender:localhost");
+	let user_id = user_id!("@receiver:localhost");
+	let device_id = device_id!("RECEIVER");
+
+	create_devices(users, user_id, &[device_id]).await?;
+
+	let add =
+		|kind: &str| users.add_to_device_event(sender, user_id, device_id, kind, &json!({}));
+
+	let first = add("m.first");
+	let second = add("m.second");
+	let next_batch = services.globals.current_count();
+	let third = add("m.third");
+
+	let counts = async |until| {
+		users
+			.get_to_device_events(user_id, device_id, None, until)
+			.map(|(count, _)| count)
+			.collect::<Vec<_>>()
+			.await
+	};
+
+	assert!(third > next_batch);
+	assert_eq!(counts(Some(next_batch)).await, [first, second]);
+	assert_eq!(counts(None).await, [first, second, third]);
+
+	users
+		.remove_to_device_events(user_id, device_id, next_batch)
+		.await;
+
+	assert_eq!(counts(None).await, [third]);
+
+	Ok(())
+}
+
+#[tokio::test]
 async fn signature_merge_waits_for_the_key_row() -> Result {
 	let Some(fixture) = fixture(Figment::new()).await? else {
 		return Ok(());

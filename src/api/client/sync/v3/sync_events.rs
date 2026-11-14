@@ -28,7 +28,7 @@ use ruma::{
 };
 use tokio::time::timeout_at;
 use tuwunel_core::{
-	Result, at,
+	Result, at, debug,
 	debug::INFO_SPAN_LEVEL,
 	error::inspect_log,
 	extract_variant, trace,
@@ -164,15 +164,27 @@ pub(crate) async fn sync_events_route(
 
 	let filter = normalize_profile_fields(filter);
 
-	let mut since = match Since::from(body.body.since.as_deref()) {
+	let since = match Since::from(body.body.since.as_deref()) {
+		| Since::Foreign if full_state => Since::Initial,
+		| since => since,
+	};
+
+	let mut since = match since {
 		| Since::Initial => None,
 		| Since::Count(since) => Some(since),
 		| Since::Foreign => {
 			let next_batch = services.globals.wait_pending().await?;
 
-			trace!(target: "tuwunel_api_client::sync::v3", next_batch, "foreign since token");
+			debug!(
+				target: "tuwunel_api_client::sync::v3",
+				user_id = %sender_user,
+				device_id = ?sender_device,
+				next_batch,
+				"foreign since token"
+			);
+
 			return Ok(
-				build_empty_response(&services, sender_user, sender_device, next_batch).await
+				build_foreign_response(&services, sender_user, sender_device, next_batch).await
 			);
 		},
 	};
@@ -240,6 +252,33 @@ pub(crate) async fn sync_events_route(
 
 		since = Some(next_batch);
 	}
+}
+
+async fn build_foreign_response(
+	services: &Services,
+	sender_user: &UserId,
+	sender_device: Option<&DeviceId>,
+	next_batch: u64,
+) -> Response {
+	let to_device_events = sender_device.map_async(|sender_device| {
+		services
+			.users
+			.get_to_device_events(sender_user, sender_device, None, Some(next_batch))
+			.map(at!(1))
+			.collect::<Vec<_>>()
+	});
+
+	let (mut response, to_device_events) = join(
+		build_empty_response(services, sender_user, sender_device, next_batch),
+		to_device_events,
+	)
+	.await;
+
+	response.to_device = ToDevice {
+		events: to_device_events.unwrap_or_default(),
+	};
+
+	response
 }
 
 async fn build_empty_response(

@@ -5,10 +5,22 @@ use futures::{
 	stream::{self, FuturesUnordered},
 };
 use ruma::{DeviceId, OwnedRoomId, RoomId, UserId};
-use tuwunel_core::{implement, trace};
+use tuwunel_core::{implement, trace, utils::stream::BroadbandExt};
 use tuwunel_database::{Interfix, Separator, serialize_key};
 
-const SHORTROOMID_LOOKUP_WIDTH: usize = 64;
+use crate::rooms::short::ShortRoomId;
+
+#[implement(super::Service)]
+async fn short_roomid_of(&self, room_id: OwnedRoomId) -> Option<(OwnedRoomId, ShortRoomId)> {
+	let short_roomid = self
+		.services
+		.short
+		.get_shortroomid(&room_id)
+		.await
+		.ok()?;
+
+	Some((room_id, short_roomid))
+}
 
 /// Register all sync watchers for the given user, device, and rooms eagerly,
 /// then return a future that resolves when any watcher fires.
@@ -109,21 +121,15 @@ where
 	pin_mut!(rooms);
 	let room_ids: Vec<OwnedRoomId> = rooms.map(RoomId::to_owned).collect().await;
 
-	let short_roomids: Vec<_> = stream::iter(&room_ids)
-		.map(async |room_id| {
-			self.services
-				.short
-				.get_shortroomid(room_id)
-				.await
-				.ok()
-				.map(|short_roomid| (&**room_id, short_roomid))
-		})
-		.buffer_unordered(SHORTROOMID_LOOKUP_WIDTH)
-		.filter_map(async |resolved| resolved)
+	let short_roomids: Vec<(OwnedRoomId, ShortRoomId)> = stream::iter(room_ids)
+		.broad_filter_map(|room_id| self.short_roomid_of(room_id))
 		.collect()
 		.await;
 
-	for (room_id, short_roomid) in short_roomids {
+	for (room_id, short_roomid) in &short_roomids {
+		let room_id: &RoomId = room_id;
+		let short_roomid = *short_roomid;
+
 		// Notification clearance
 		futures.push(
 			self.db
