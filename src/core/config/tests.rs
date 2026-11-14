@@ -523,6 +523,22 @@ fn legacy_state_local_switch_is_reloadable() {
 }
 
 #[test]
+fn sync_fastpath_switches_default_off_and_reload() {
+	let default = default_config();
+	let enabled = config_from_toml(
+		"[global.client.sync]\nfastpath = true\nfastpath_verify = true\ntimeout_min = 7\n",
+	)
+	.unwrap();
+
+	assert!(!default.client.sync.fastpath);
+	assert!(!default.client.sync.fastpath_verify);
+	assert!(enabled.client.sync.fastpath);
+	assert!(enabled.client.sync.fastpath_verify);
+	assert_eq!(enabled.client.sync.timeout_min, 7);
+	reload(&default, &enabled).expect("sync fastpath switches should reload");
+}
+
+#[test]
 fn prev_events_concurrency_is_nonzero_and_reloadable() {
 	let default = default_config();
 	let zero = config_from_toml("[global]\nprev_events_concurrency = 0\n").unwrap();

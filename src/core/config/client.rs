@@ -88,6 +88,29 @@ pub struct Sync {
 	/// legacy: calculate_heroes
 	#[serde(default = "true_fn")]
 	pub calculate_heroes: bool,
+
+	/// Answers a quiet room in legacy sync from a cheap probe instead of
+	/// assembling its entry.
+	///
+	/// The probe covers the room's timeline, typing, read receipts, private
+	/// read markers, room account data, notification counts and device-list
+	/// changes. A room with a change in any of them is assembled in full as
+	/// usual, so the response is the same. `fastpath_verify` takes precedence.
+	///
+	/// reloadable: yes
+	#[serde(default)]
+	pub fastpath: bool,
+
+	/// Runs the quiet-room probe in legacy sync but always answers with the
+	/// fully assembled entry.
+	///
+	/// A quiet verdict that the assembled entry contradicts is logged as an
+	/// error and counted, so the probe can be checked against real traffic
+	/// without any risk to clients. Takes precedence over `fastpath`.
+	///
+	/// reloadable: yes
+	#[serde(default)]
+	pub fastpath_verify: bool,
 }
 
 impl Default for Sync {
@@ -97,6 +120,8 @@ impl Default for Sync {
 			timeout_default: default_timeout_default(),
 			timeout_max: default_timeout_max(),
 			calculate_heroes: true_fn(),
+			fastpath: false,
+			fastpath_verify: false,
 		}
 	}
 }
