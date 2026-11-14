@@ -144,11 +144,6 @@ impl Round<'_> {
 	}
 
 	async fn verify(self, dlu: HashSet<OwnedUserId>) -> Result<Outcome> {
-		let loaded = self.load().await;
-		let Some(diff) = mismatch(&loaded, &dlu) else {
-			return loaded.map(with_verdict(Verdict::Quiet));
-		};
-
 		let Self {
 			services,
 			sender_user,
@@ -157,6 +152,28 @@ impl Round<'_> {
 			next_batch,
 			..
 		} = self;
+
+		let loaded = self.load().await;
+		let diff = match &loaded {
+			| Ok(loaded) => mismatch(loaded, &dlu),
+			| Err(error) => {
+				debug!(
+					target: "tuwunel_api_client::sync::v3::fastpath",
+					%room_id,
+					%sender_user,
+					since,
+					next_batch,
+					%error,
+					"sync fastpath verification skipped, load_room failed"
+				);
+
+				None
+			},
+		};
+
+		let Some(diff) = diff else {
+			return loaded.map(with_verdict(Verdict::Quiet));
+		};
 
 		match self.probe().await {
 			| Err(busy) => {
@@ -373,13 +390,11 @@ fn probe_failed(room_id: &RoomId, error: &Error) -> Busy {
 	Busy::Error
 }
 
-fn mismatch(loaded: &Result<Loaded>, dlu: &HashSet<OwnedUserId>) -> Option<String> {
-	match loaded {
-		| Err(error) => Some(format!("load_room failed: {error}")),
-		| Ok((room, slow_dlu, leu)) if room.is_empty() && slow_dlu == dlu && leu.is_empty() =>
-			None,
-		| Ok((room, slow_dlu, leu)) => Some(describe(room, slow_dlu, leu, dlu)),
-	}
+fn mismatch(loaded: &Loaded, dlu: &HashSet<OwnedUserId>) -> Option<String> {
+	let (room, slow_dlu, leu) = loaded;
+
+	(!(room.is_empty() && slow_dlu == dlu && leu.is_empty()))
+		.then(|| describe(room, slow_dlu, leu, dlu))
 }
 
 fn describe(

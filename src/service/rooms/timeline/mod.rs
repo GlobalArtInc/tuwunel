@@ -19,7 +19,7 @@ mod tests;
 use std::{
 	collections::HashMap,
 	fmt::Write,
-	sync::{Arc, RwLock},
+	sync::{Arc, PoisonError, RwLock},
 };
 
 use async_trait::async_trait;
@@ -601,7 +601,7 @@ pub async fn last_normal_count(&self, room_id: &RoomId) -> Result<Option<u64>> {
 fn cached_normal_count(&self, room_id: &RoomId) -> Option<u64> {
 	self.last_normal
 		.read()
-		.expect("last_normal locked")
+		.unwrap_or_else(PoisonError::into_inner)
 		.get(room_id)
 		.copied()
 }
@@ -611,21 +611,13 @@ fn note_normal_count(&self, room_id: &RoomId, count: u64) -> u64 {
 	let mut last_normal = self
 		.last_normal
 		.write()
-		.expect("last_normal locked");
+		.unwrap_or_else(PoisonError::into_inner);
 	let last = last_normal
 		.entry(room_id.to_owned())
 		.or_insert(count);
 
 	*last = (*last).max(count);
 	*last
-}
-
-#[implement(Service)]
-fn forget_normal_count(&self, room_id: &RoomId) {
-	self.last_normal
-		.write()
-		.expect("last_normal locked")
-		.remove(room_id);
 }
 
 /// Returns the indexed event ID nearest a timestamp in one direction.

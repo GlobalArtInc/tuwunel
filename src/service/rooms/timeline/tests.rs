@@ -164,32 +164,25 @@ async fn noting_a_count_never_lowers_the_index() -> Result {
 }
 
 #[tokio::test]
-async fn forgotten_index_of_a_backfilled_only_room_reads_none_and_stays_empty() -> Result {
+async fn backfilled_only_room_reads_none_and_is_not_indexed() -> Result {
 	let Some(fixture) = fixture(Figment::new()).await? else {
 		return Ok(());
 	};
 
 	let services = &fixture.services;
 	let timeline = &services.timeline;
-	let room = room_id!("!forgetcount:localhost");
+	let room = room_id!("!backfilledonly:localhost");
 	let shortroomid = services
 		.short
 		.get_or_create_shortroomid(room)
 		.await;
-
-	let normal: RawPduId = PduId { shortroomid, count: PduCount::Normal(9) }.into();
-	services.db["pduid_pdu"].insert(&normal, b"{}");
-
-	assert_eq!(timeline.last_normal_count(room).await?, Some(9));
 
 	let backfilled: RawPduId = PduId {
 		shortroomid,
 		count: PduCount::Backfilled(-4),
 	}
 	.into();
-	services.db["pduid_pdu"].remove(&normal);
 	services.db["pduid_pdu"].insert(&backfilled, b"{}");
-	timeline.forget_normal_count(room);
 
 	assert_eq!(timeline.last_normal_count(room).await?, None);
 	assert_eq!(timeline.cached_normal_count(room), None);

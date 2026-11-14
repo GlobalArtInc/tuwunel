@@ -5,8 +5,11 @@ use std::net::TcpListener;
 use futures::future::join;
 use serde_json::{Map, Value, json};
 use tuwunel::{Args, Runtime, Server, async_run, async_start, async_stop};
-use tuwunel_core::{Result, implement, ruma::RoomId};
-use tuwunel_service::{Services, users::DeviceListChange};
+use tuwunel_core::{
+	Result, implement,
+	ruma::{MilliSecondsSinceUnixEpoch, RoomId, events::receipt::ReceiptThread},
+};
+use tuwunel_service::{Services, rooms::read_receipt::PrivateRead, users::DeviceListChange};
 
 use self::{
 	account::account,
@@ -126,12 +129,13 @@ async fn exercise(services: &Services, base: &str, verify: bool) -> Result {
 		.create_room(&json!({ "preset": "public_chat" }))
 		.await?;
 
-	let since = field(&alice.sync(None).await?, "next_batch")?.to_owned();
+	let since = field(&alice.sync(None, None).await?, "next_batch")?.to_owned();
 	let mut watch = Watch {
 		alice: &alice,
 		since,
 		quiet: &quiet,
 		target: &target,
+		filter: None,
 	};
 
 	let message = bob
@@ -226,6 +230,63 @@ async fn exercise(services: &Services, base: &str, verify: bool) -> Result {
 		"the global account data round reported rooms",
 	)?;
 
+	let later = bob
+		.send_text(&target, "fastpath-two", "later")
+		.await?;
+
+	watch.sees("timeline", later.as_str()).await?;
+
+	services
+		.pusher
+		.reset_notification_counts(&alice_id, &target)
+		.await;
+
+	watch
+		.sees("unread_notifications", "notification_count")
+		.await?;
+
+	services
+		.read_receipt
+		.private_read_set(PrivateRead {
+			room_id: &target,
+			user_id: &alice_id,
+			count: services
+				.timeline
+				.get_pdu_count(&later)
+				.await?
+				.into_unsigned(),
+			ts: MilliSecondsSinceUnixEpoch::now(),
+			thread: &ReceiptThread::Unthreaded,
+			announce: true,
+		})
+		.await;
+
+	watch.sees("ephemeral", "m.read.private").await?;
+
+	let reply = json!({
+		"msgtype": "m.text",
+		"body": "reply",
+		"m.relates_to": { "rel_type": "m.thread", "event_id": later },
+	});
+
+	watch.filter = Some(
+		json!({ "room": { "timeline": { "unread_thread_notifications": true } } }).to_string(),
+	);
+
+	bob.put(&format!("rooms/{target}/send/m.room.message/fastpath-reply"), &reply)
+		.await?;
+
+	watch.sees("timeline", "m.thread").await?;
+
+	services
+		.pusher
+		.reset_thread_notification_counts(&alice_id, &target, &later)
+		.await;
+
+	watch
+		.sees("unread_thread_notifications", later.as_str())
+		.await?;
+
 	require(
 		!verify || services.sync.fastpath_mismatches() == 0,
 		"the verification mode recorded a mismatch",
@@ -237,11 +298,16 @@ struct Watch<'a> {
 	since: String,
 	quiet: &'a RoomId,
 	target: &'a RoomId,
+	filter: Option<String>,
 }
 
 impl Watch<'_> {
 	async fn round(&mut self) -> Result<Value> {
-		let response = self.alice.sync(Some(self.since.as_str())).await?;
+		let since = Some(self.since.as_str());
+		let response = self
+			.alice
+			.sync(since, self.filter.as_deref())
+			.await?;
 
 		self.since = field(&response, "next_batch")?.to_owned();
 
@@ -268,8 +334,9 @@ impl Watch<'_> {
 }
 
 #[implement(Client, params = "<'_>")]
-async fn sync(&self, since: Option<&str>) -> Result<Value> {
+async fn sync(&self, since: Option<&str>, filter: Option<&str>) -> Result<Value> {
 	let since = since.map(|since| ("since", since));
+	let filter = filter.map(|filter| ("filter", filter));
 
 	self.services
 		.client
@@ -279,6 +346,7 @@ async fn sync(&self, since: Option<&str>) -> Result<Value> {
 		.bearer_auth(self.token)
 		.query(&[("timeout", "0")])
 		.query(since.as_slice())
+		.query(filter.as_slice())
 		.send()
 		.await?
 		.error_for_status()?

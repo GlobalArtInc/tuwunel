@@ -40,8 +40,7 @@ pub async fn purge_history(
 
 	let prefix = start.shortroomid();
 
-	let purged = self
-		.db
+	self.db
 		.pduid_pdu
 		.raw_stream_from(&start)
 		.ready_try_take_while(move |kv| {
@@ -92,9 +91,5 @@ pub async fn purge_history(
 
 			Ok(purged.saturating_add(1))
 		})
-		.await;
-
-	self.forget_normal_count(room_id);
-
-	purged
+		.await
 }

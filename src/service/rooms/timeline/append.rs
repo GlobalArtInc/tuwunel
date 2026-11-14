@@ -228,7 +228,6 @@ where
 
 	// Insert pdu
 	self.append_pdu_json(&pdu_id, pdu, &pdu_json);
-	self.note_normal_count(pdu.room_id(), *next_count);
 
 	drop(insert_lock);
 
@@ -635,6 +634,10 @@ fn append_pdu_json(&self, pdu_id: &RawPduId, pdu: &PduEvent, json: &CanonicalJso
 	txn.put_raw(&self.db.roomid_tscount_pducount, key, pdu_id.count());
 
 	txn.execute();
+
+	if let PduCount::Normal(count) = pdu_id.pdu_count() {
+		self.note_normal_count(pdu.room_id(), count);
+	}
 }
 
 #[cfg(test)]
