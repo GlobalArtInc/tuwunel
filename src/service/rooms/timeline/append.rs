@@ -228,6 +228,7 @@ where
 
 	// Insert pdu
 	self.append_pdu_json(&pdu_id, pdu, &pdu_json);
+	self.note_normal_count(pdu.room_id(), *next_count);
 
 	drop(insert_lock);
 

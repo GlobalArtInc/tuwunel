@@ -16,7 +16,11 @@ mod redact;
 #[cfg(test)]
 mod tests;
 
-use std::{fmt::Write, sync::Arc};
+use std::{
+	collections::HashMap,
+	fmt::Write,
+	sync::{Arc, RwLock},
+};
 
 use async_trait::async_trait;
 use futures::{
@@ -78,6 +82,7 @@ pub struct Service {
 	/// Acquire it after any federation or state mutex held for the same room.
 	/// Never acquire either outer mutex while holding this guard.
 	pub mutex_insert: RoomMutexMap,
+	last_normal: RwLock<HashMap<OwnedRoomId, u64>>,
 }
 
 struct Data {
@@ -133,6 +138,7 @@ impl crate::Service for Service {
 				db: args.db.clone(),
 			},
 			mutex_insert: RoomMutexMap::new(),
+			last_normal: RwLock::default(),
 		}))
 	}
 
@@ -557,6 +563,69 @@ pub async fn last_timeline_count(
 		.unwrap_or_else(PduCount::max);
 
 	Ok(last_count)
+}
+
+#[implement(Service)]
+#[tracing::instrument(skip(self), level = "debug")]
+pub async fn last_normal_count(&self, room_id: &RoomId) -> Result<Option<u64>> {
+	if let Some(count) = self.cached_normal_count(room_id) {
+		return Ok(Some(count));
+	}
+
+	let from = self
+		.count_to_id(room_id, PduCount::max(), Direction::Backward)
+		.await?;
+
+	let prefix = from.shortroomid();
+	let counts = self
+		.db
+		.pduid_pdu
+		.rev_raw_keys_from(&from)
+		.ready_try_take_while(move |key| Ok(key.starts_with(&prefix)))
+		.ready_and_then(|key| {
+			RawPduId::try_from_bytes(key)
+				.map(RawPduId::pdu_count)
+				.ok_or_else(|| err!(Database("Malformed pduid_pdu key in room {room_id:?}")))
+		});
+
+	pin_mut!(counts);
+	let last = counts.try_next().await?;
+
+	match last {
+		| Some(PduCount::Normal(count)) => Ok(Some(self.note_normal_count(room_id, count))),
+		| _ => Ok(None),
+	}
+}
+
+#[implement(Service)]
+fn cached_normal_count(&self, room_id: &RoomId) -> Option<u64> {
+	self.last_normal
+		.read()
+		.expect("last_normal locked")
+		.get(room_id)
+		.copied()
+}
+
+#[implement(Service)]
+fn note_normal_count(&self, room_id: &RoomId, count: u64) -> u64 {
+	let mut last_normal = self
+		.last_normal
+		.write()
+		.expect("last_normal locked");
+	let last = last_normal
+		.entry(room_id.to_owned())
+		.or_insert(count);
+
+	*last = (*last).max(count);
+	*last
+}
+
+#[implement(Service)]
+fn forget_normal_count(&self, room_id: &RoomId) {
+	self.last_normal
+		.write()
+		.expect("last_normal locked")
+		.remove(room_id);
 }
 
 /// Returns the indexed event ID nearest a timestamp in one direction.

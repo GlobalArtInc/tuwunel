@@ -45,7 +45,8 @@ pub async fn delete_pdus(&self, room_id: &RoomId) -> Result {
 		.await?;
 
 	let prefix = current.shortroomid();
-	self.db
+	let deleted = self
+		.db
 		.pduid_pdu
 		.raw_stream_from(&current)
 		.ready_try_take_while(move |(key, _)| Ok(key.starts_with(&prefix)))
@@ -69,7 +70,11 @@ pub async fn delete_pdus(&self, room_id: &RoomId) -> Result {
 
 			Ok(())
 		})
-		.await
+		.await;
+
+	self.forget_normal_count(room_id);
+
+	deleted
 }
 
 /// Streams decoded room events from the timestamp index in one direction.

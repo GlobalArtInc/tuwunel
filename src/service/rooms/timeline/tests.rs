@@ -27,7 +27,7 @@ use ruma::{
 use tuwunel_core::{Error, Result, config::Figment, utils::result::NotFound};
 use tuwunel_matrix::pdu::PduBuilder;
 
-use super::{Direction, PduCount, Service};
+use super::{Direction, PduCount, PduId, RawPduId, Service};
 use crate::{
 	Services,
 	test_utils::{fixture, pdu_id, poll_once},
@@ -106,6 +106,95 @@ fn forward_backfilled_zero_stays_at_lower_bound() {
 	let pdu_id = Service::pdu_count_to_id(1, PduCount::Backfilled(0), Direction::Forward);
 
 	assert_eq!(pdu_id.pdu_count(), PduCount::Backfilled(0));
+}
+
+#[tokio::test]
+async fn last_normal_count_reads_the_newest_normal_row_then_serves_the_index() -> Result {
+	let Some(fixture) = fixture(Figment::new()).await? else {
+		return Ok(());
+	};
+
+	let services = &fixture.services;
+	let timeline = &services.timeline;
+	let room = room_id!("!lastnormal:localhost");
+	let shortroomid = services
+		.short
+		.get_or_create_shortroomid(room)
+		.await;
+
+	for count in [PduCount::Backfilled(-4), PduCount::Normal(5), PduCount::Normal(9)] {
+		let id: RawPduId = PduId { shortroomid, count }.into();
+		services.db["pduid_pdu"].insert(&id, b"{}");
+	}
+
+	assert_eq!(timeline.last_normal_count(room).await?, Some(9));
+
+	let newest: RawPduId = PduId { shortroomid, count: PduCount::Normal(9) }.into();
+	services.db["pduid_pdu"].remove(&newest);
+
+	assert_eq!(timeline.last_normal_count(room).await?, Some(9));
+
+	Ok(())
+}
+
+#[tokio::test]
+async fn noting_a_count_never_lowers_the_index() -> Result {
+	let Some(fixture) = fixture(Figment::new()).await? else {
+		return Ok(());
+	};
+
+	let services = &fixture.services;
+	let timeline = &services.timeline;
+	let room = room_id!("!notecount:localhost");
+	let shortroomid = services
+		.short
+		.get_or_create_shortroomid(room)
+		.await;
+
+	let id: RawPduId = PduId { shortroomid, count: PduCount::Normal(9) }.into();
+	services.db["pduid_pdu"].insert(&id, b"{}");
+
+	assert_eq!(timeline.last_normal_count(room).await?, Some(9));
+	assert_eq!(timeline.note_normal_count(room, 3), 9);
+	assert_eq!(timeline.last_normal_count(room).await?, Some(9));
+	assert_eq!(timeline.note_normal_count(room, 12), 12);
+	assert_eq!(timeline.last_normal_count(room).await?, Some(12));
+
+	Ok(())
+}
+
+#[tokio::test]
+async fn forgotten_index_of_a_backfilled_only_room_reads_none_and_stays_empty() -> Result {
+	let Some(fixture) = fixture(Figment::new()).await? else {
+		return Ok(());
+	};
+
+	let services = &fixture.services;
+	let timeline = &services.timeline;
+	let room = room_id!("!forgetcount:localhost");
+	let shortroomid = services
+		.short
+		.get_or_create_shortroomid(room)
+		.await;
+
+	let normal: RawPduId = PduId { shortroomid, count: PduCount::Normal(9) }.into();
+	services.db["pduid_pdu"].insert(&normal, b"{}");
+
+	assert_eq!(timeline.last_normal_count(room).await?, Some(9));
+
+	let backfilled: RawPduId = PduId {
+		shortroomid,
+		count: PduCount::Backfilled(-4),
+	}
+	.into();
+	services.db["pduid_pdu"].remove(&normal);
+	services.db["pduid_pdu"].insert(&backfilled, b"{}");
+	timeline.forget_normal_count(room);
+
+	assert_eq!(timeline.last_normal_count(room).await?, None);
+	assert_eq!(timeline.cached_normal_count(room), None);
+
+	Ok(())
 }
 
 #[tokio::test]
