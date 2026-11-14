@@ -5,9 +5,10 @@
 //! telemetry.
 
 pub mod dump;
+pub mod prom;
 
 use std::sync::{
-	Arc, Mutex,
+	Arc, Mutex, OnceLock,
 	atomic::{AtomicU32, AtomicU64},
 };
 #[cfg(tokio_unstable)]
@@ -47,6 +48,8 @@ pub struct Metrics {
 	task_monitor: Option<TaskMonitor>,
 
 	task_intervals: Mutex<Option<Box<dyn Iterator<Item = TaskMetrics> + Send>>>,
+
+	prom: OnceLock<prom::Registry>,
 
 	#[cfg(tokio_unstable)]
 	_runtime_monitor: Option<RuntimeMonitor>,
@@ -122,6 +125,8 @@ impl Metrics {
 
 			task_intervals: task_intervals.into(),
 
+			prom: OnceLock::new(),
+
 			#[cfg(tokio_unstable)]
 			_runtime_monitor: runtime_monitor,
 
@@ -137,6 +142,18 @@ impl Metrics {
 			requests_panic: AtomicU32::new(0),
 		})
 	}
+
+	/// Turns on the Prometheus registry and returns it.
+	///
+	/// Enabling happens once at startup. Until then every recording site
+	/// finds [`Self::prometheus`] empty and does nothing.
+	pub fn enable_prometheus(&self) -> &prom::Registry {
+		self.prom.get_or_init(prom::Registry::new)
+	}
+
+	#[inline]
+	/// Returns the Prometheus registry when it is enabled.
+	pub fn prometheus(&self) -> Option<&prom::Registry> { self.prom.get() }
 
 	#[inline]
 	/// Awaits a future under task instrumentation when a monitor is available.
