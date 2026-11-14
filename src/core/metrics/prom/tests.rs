@@ -4,7 +4,8 @@ use regex::Regex;
 
 use super::{
 	APPSERVICE_CAP, CacheSample, Condition, Counter, DynFamily, EnumFamily, Gauge, Histogram,
-	MAX_KEY_LEN, Metric, OTHER, Registry, RocksSample, Scale, SendResult, Writer,
+	MAX_KEY_LEN, Metric, OTHER, Op, PROVIDER_CAP, Registry, RocksSample, Scale, SendResult,
+	Writer,
 };
 use crate::label_set;
 
@@ -516,5 +517,48 @@ fn appservice_delivery_is_counted_per_appservice_and_capped() {
 		assert!(text.contains(line), "{line}\n{text}");
 	}
 
+	assert!(parsed.samples <= registry.max_series());
+}
+
+#[test]
+fn storage_operations_are_counted_per_provider_and_op() {
+	let registry = Registry::new();
+	let group = &registry.storage;
+
+	group.timed("media", Op::Get, true, Duration::from_millis(30));
+	group.timed("media", Op::Get, false, Duration::from_secs(1));
+	group.counted("media", Op::Delete, true);
+
+	assert_eq!(group.operations("media", Op::Get, true), 1);
+	assert_eq!(group.operations("media", Op::Get, false), 1);
+	assert_eq!(group.operations("media", Op::Put, true), 0);
+
+	let text = registry.render();
+	let parsed = parse(&text);
+
+	for line in [
+		"tuwunel_storage_operations_total{provider=\"media\",op=\"get\",result=\"ok\"} 1\n",
+		"tuwunel_storage_operations_total{provider=\"media\",op=\"get\",result=\"error\"} 1\n",
+		"tuwunel_storage_operations_total{provider=\"media\",op=\"delete\",result=\"ok\"} 1\n",
+		"tuwunel_storage_operation_seconds_count{provider=\"media\",op=\"get\"} 2\n",
+		"tuwunel_storage_operation_seconds_count{provider=\"media\",op=\"delete\"} 0\n",
+	] {
+		assert!(text.contains(line), "{line}\n{text}");
+	}
+
+	for index in 0..PROVIDER_CAP.saturating_add(4) {
+		group.counted(&format!("p{index}"), Op::Head, true);
+	}
+
+	let text = registry.render();
+
+	assert!(
+		text.contains(
+			"tuwunel_metrics_series_overflow_total{family=\"tuwunel_storage_operations_total\"} \
+			 5\n"
+		),
+		"{text}"
+	);
+	assert!(parse(&text).samples <= registry.max_series());
 	assert!(parsed.samples <= registry.max_series());
 }

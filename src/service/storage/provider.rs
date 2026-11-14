@@ -35,7 +35,7 @@ use std::{
 	iter::{from_fn, once},
 	ops::Range,
 	sync::Arc,
-	time::Duration,
+	time::{Duration, Instant},
 };
 
 use bytes::Bytes;
@@ -54,7 +54,9 @@ use tuwunel_core::{
 	config::StorageProvider,
 	debug, err, error,
 	error::error_chain,
-	extract_variant, implement, info, trace,
+	extract_variant, implement, info,
+	metrics::prom::Op,
+	trace,
 	utils::{
 		BoolExt,
 		result::FlatOk,
@@ -89,7 +91,6 @@ pub struct Provider {
 
 	startup_check: bool,
 
-	#[expect(unused)]
 	#[debug(skip)]
 	services: Arc<crate::services::OnceServices>,
 }
@@ -160,7 +161,9 @@ where
 	PutPayload: From<T> + From<PutPayload>,
 {
 	if size.is_none_or(|size| size >= self.multipart_threshold()) {
-		return self.put_multi(path, input).await;
+		return self
+			.measured(Op::Put, self.put_multi(path, input))
+			.await;
 	}
 
 	debug!(
@@ -213,7 +216,7 @@ where
 		"Selecting multi-part upload..."
 	);
 
-	self.put_multi(path, chunked(payload, part_size).try_stream())
+	self.measured(Op::Put, self.put_multi(path, chunked(payload, part_size).try_stream()))
 		.await
 }
 
@@ -294,10 +297,13 @@ where
 async fn put_single(&self, path: &str, input: PutPayload) -> Result<PutResult> {
 	let path = self.to_abs_path(path)?;
 
-	self.provider
-		.put(&path, input)
-		.map_err(Error::from)
-		.await
+	self.measured(
+		Op::Put,
+		self.provider
+			.put(&path, input)
+			.map_err(Error::from),
+	)
+	.await
 }
 
 /// Streams an object's bytes together with shared response metadata.
@@ -400,9 +406,7 @@ pub async fn get(&self, path: &str) -> Result<Bytes> {
 pub async fn load(&self, path: &str) -> Result<GetResult> {
 	let path = self.to_abs_path(path)?;
 
-	self.provider
-		.get(&path)
-		.map_err(Error::from)
+	self.measured(Op::Get, self.provider.get(&path).map_err(Error::from))
 		.await
 }
 
@@ -497,9 +501,12 @@ where
 		})
 		.boxed(); // type-erasure boundary
 
+	let counted = self.clone();
+
 	self.provider
 		.delete_stream(paths)
 		.map_err(Error::from)
+		.inspect(move |result| counted.count(Op::Delete, result.is_ok()))
 }
 
 /// Renames an object within this provider.
@@ -522,15 +529,16 @@ pub async fn rename(&self, src: &str, dst: &str, overwrite: CopyMode) -> Result 
 	let src = self.to_abs_path(src)?;
 	let dst = self.to_abs_path(dst)?;
 
-	match overwrite {
+	let rename = match overwrite {
 		| CopyMode::Overwrite => self.provider.rename(&src, &dst).left_future(),
 		| CopyMode::Create => self
 			.provider
 			.rename_if_not_exists(&src, &dst)
 			.right_future(),
-	}
-	.map_err(Error::from)
-	.await
+	};
+
+	self.measured(Op::Rename, rename.map_err(Error::from))
+		.await
 }
 
 /// Copies an object within this provider.
@@ -553,15 +561,16 @@ pub async fn copy(&self, src: &str, dst: &str, overwrite: CopyMode) -> Result {
 	let src = self.to_abs_path(src)?;
 	let dst = self.to_abs_path(dst)?;
 
-	match overwrite {
+	let copy = match overwrite {
 		| CopyMode::Overwrite => self.provider.copy(&src, &dst).left_future(),
 		| CopyMode::Create => self
 			.provider
 			.copy_if_not_exists(&src, &dst)
 			.right_future(),
-	}
-	.map_err(Error::from)
-	.await
+	};
+
+	self.measured(Op::Copy, copy.map_err(Error::from))
+		.await
 }
 
 /// Streams object metadata beneath an optional logical prefix.
@@ -607,9 +616,9 @@ pub fn list(&self, prefix: Option<&str>) -> impl Stream<Item = Result<ObjectMeta
 	)
 )]
 pub async fn head(&self, path: &str) -> Result<ObjectMeta> {
-	self.provider
-		.head(&self.to_abs_path(path)?)
-		.map_err(Error::from)
+	let path = self.to_abs_path(path)?;
+
+	self.measured(Op::Head, self.provider.head(&path).map_err(Error::from))
 		.await
 }
 
@@ -634,6 +643,34 @@ pub async fn ping(&self) -> Result {
 		})
 		.await
 		.map(|_| ())
+}
+
+/// Awaits a call to the backend and records its outcome and duration while
+/// metrics are on.
+///
+/// A call whose future is dropped before it finishes is not recorded.
+#[implement(Provider)]
+async fn measured<T>(&self, op: Op, call: impl Future<Output = Result<T>>) -> Result<T> {
+	let Some(registry) = self.services.server.metrics.prometheus() else {
+		return call.await;
+	};
+
+	let started = Instant::now();
+	let result = call.await;
+
+	registry
+		.storage
+		.timed(&self.name, op, result.is_ok(), started.elapsed());
+
+	result
+}
+
+/// Counts an operation that is not timed, while metrics are on.
+#[implement(Provider)]
+fn count(&self, op: Op, ok: bool) {
+	if let Some(registry) = self.services.server.metrics.prometheus() {
+		registry.storage.counted(&self.name, op, ok);
+	}
 }
 
 #[implement(Provider)]
