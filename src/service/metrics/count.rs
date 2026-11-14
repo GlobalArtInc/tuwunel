@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
-use futures::{TryStreamExt, future::ready};
+use futures::{StreamExt, TryFutureExt, TryStreamExt, future::ready};
 use tokio::time::timeout;
 use tuwunel_core::{Result, err, implement, warn};
 use tuwunel_database::Map;
@@ -9,7 +9,10 @@ use super::Service;
 
 const SCAN_TIMEOUT: Duration = Duration::from_mins(1);
 
-/// Counts users, rooms and devices by walking their keys once.
+const QUEUE_CAP: usize = 100_000;
+
+/// Counts users, rooms and devices by walking their keys once, and the events
+/// queued for each appservice up to a ceiling.
 ///
 /// Each count is independent. A scan that fails or runs past a minute is
 /// logged and its gauge keeps the previous value. The walk holds no lock of
@@ -33,10 +36,32 @@ pub async fn count_once(&self) {
 	if let Some(devices) = scan("devices", &self.userdeviceid_metadata).await {
 		inventory.set_devices(devices);
 	}
+
+	let sending = &self.services.sending;
+	let ids: Vec<String> = self
+		.services
+		.appservice
+		.iter_ids()
+		.collect()
+		.await;
+
+	for id in ids {
+		let queued = sending
+			.queued_for(&id, QUEUE_CAP)
+			.map_ok(|events| u64::try_from(events).unwrap_or(u64::MAX));
+
+		if let Some(events) = guarded("appservice queue", queued).await {
+			registry.appservice.set_queued(&id, events);
+		}
+	}
 }
 
 async fn scan(what: &'static str, map: &Arc<Map>) -> Option<u64> {
-	let counted = timeout(SCAN_TIMEOUT, count_keys(map))
+	guarded(what, count_keys(map)).await
+}
+
+async fn guarded(what: &'static str, count: impl Future<Output = Result<u64>>) -> Option<u64> {
+	let counted = timeout(SCAN_TIMEOUT, count)
 		.await
 		.map_err(|_| err!("scan exceeded {SCAN_TIMEOUT:?}"))
 		.and_then(|result| result);

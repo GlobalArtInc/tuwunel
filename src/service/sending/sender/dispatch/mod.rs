@@ -1,4 +1,4 @@
-mod appservice;
+pub(super) mod appservice;
 mod federation;
 mod push;
 

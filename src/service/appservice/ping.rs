@@ -7,7 +7,8 @@ use ruma::api::{
 	error::{BadStatusErrorData, ErrorKind},
 };
 use tuwunel_core::{
-	Error, Result, err, http::StatusCode, implement, utils::string_from_bytes, warn,
+	Error, Result, err, http::StatusCode, implement, metrics::prom::SendResult,
+	utils::string_from_bytes, warn,
 };
 
 use super::request::add_access_token_query;
@@ -35,6 +36,8 @@ pub async fn ping(
 	let mut http_request = request
 		.try_into_http_request::<BytesMut>(base, SendAccessToken::IfRequired(hs_token), ())
 		.map_err(|e| {
+			self.record_ping(&registration.id, SendResult::Network);
+
 			err!(Request(ConnectionFailed(warn!(
 				appservice = %registration.id,
 				%dest,
@@ -56,6 +59,8 @@ pub async fn ping(
 			let e = e.without_url();
 
 			if e.is_timeout() {
+				self.record_ping(&registration.id, SendResult::Timeout);
+
 				err!(Request(ConnectionTimeout(warn!(
 					appservice = %registration.id,
 					%dest,
@@ -63,6 +68,8 @@ pub async fn ping(
 					"Connection to appservice timed out"
 				))))
 			} else {
+				self.record_ping(&registration.id, SendResult::Network);
+
 				err!(Request(ConnectionFailed(warn!(
 					appservice = %registration.id,
 					%dest,
@@ -74,8 +81,12 @@ pub async fn ping(
 
 	let status = response.status();
 	if status.is_success() {
+		self.record_ping(&registration.id, SendResult::Ok);
+
 		return Ok(());
 	}
+
+	self.record_ping(&registration.id, SendResult::BadResponse);
 
 	let limit = self
 		.services
@@ -101,4 +112,11 @@ pub async fn ping(
 		format!("Appservice returned status {status}").into(),
 		StatusCode::BAD_REQUEST,
 	))
+}
+
+#[implement(super::Service)]
+fn record_ping(&self, id: &str, result: SendResult) {
+	if let Some(registry) = self.services.server.metrics.prometheus() {
+		registry.appservice.ping(id, result);
+	}
 }

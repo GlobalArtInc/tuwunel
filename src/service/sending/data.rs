@@ -15,7 +15,8 @@ use std::{
 };
 
 use futures::{
-	Stream, StreamExt,
+	Stream, StreamExt, TryStreamExt,
+	future::ready,
 	stream::{iter, unfold},
 };
 use ruma::{OwnedServerName, ServerName, UserId};
@@ -294,6 +295,22 @@ pub fn queued_requests(
 	let prefix = destination.get_prefix();
 
 	self.queued_range(&prefix, prefix_end(prefix.clone()))
+}
+
+/// Counts the queued rows of one destination, up to `cap`.
+///
+/// Only keys are read, so a row is never decoded, and the walk stops after
+/// `cap` keys however long the queue is. Rows already claimed by a transaction
+/// are not queued and are not counted.
+#[implement(Data)]
+pub(super) async fn queued_for(&self, destination: &Destination, cap: usize) -> Result<usize> {
+	let prefix = destination.get_prefix();
+
+	self.servernameevent_data
+		.raw_keys_prefix(&prefix)
+		.take(cap)
+		.try_fold(0_usize, |count, _| ready(Ok(count.saturating_add(1))))
+		.await
 }
 
 /// Streams the queued PDU rows of one room for a destination.

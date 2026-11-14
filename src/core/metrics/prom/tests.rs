@@ -1,10 +1,10 @@
-use std::{collections::BTreeSet, sync::Arc, thread};
+use std::{collections::BTreeSet, sync::Arc, thread, time::Duration};
 
 use regex::Regex;
 
 use super::{
-	CacheSample, Condition, Counter, DynFamily, EnumFamily, Gauge, Histogram, MAX_KEY_LEN,
-	Metric, OTHER, Registry, RocksSample, Scale, Writer,
+	APPSERVICE_CAP, CacheSample, Condition, Counter, DynFamily, EnumFamily, Gauge, Histogram,
+	MAX_KEY_LEN, Metric, OTHER, Registry, RocksSample, Scale, SendResult, Writer,
 };
 use crate::label_set;
 
@@ -481,4 +481,40 @@ fn rocksdb_readings_are_exposed_once_taken_and_events_always() {
 			.render()
 			.contains("tuwunel_rocksdb_sst_bytes 4096\n")
 	);
+}
+
+#[test]
+fn appservice_delivery_is_counted_per_appservice_and_capped() {
+	let registry = Registry::new();
+	let group = &registry.appservice;
+
+	group.transaction("bridge", SendResult::Ok, Duration::from_millis(30));
+	group.transaction("bridge", SendResult::Timeout, Duration::from_secs(40));
+	group.ping("bridge", SendResult::BadResponse);
+	group.set_queued("bridge", 7);
+
+	for index in 0..APPSERVICE_CAP.saturating_add(10) {
+		group.ping(&format!("as{index}"), SendResult::Ok);
+	}
+
+	assert_eq!(group.transactions("bridge", SendResult::Ok), 1);
+	assert_eq!(group.transactions("bridge", SendResult::Network), 0);
+
+	let text = registry.render();
+	let parsed = parse(&text);
+
+	for line in [
+		"tuwunel_appservice_transactions_total{appservice=\"bridge\",result=\"ok\"} 1\n",
+		"tuwunel_appservice_transactions_total{appservice=\"bridge\",result=\"timeout\"} 1\n",
+		"tuwunel_appservice_transaction_seconds_bucket{appservice=\"bridge\",le=\"0.05\"} 1\n",
+		"tuwunel_appservice_transaction_seconds_count{appservice=\"bridge\"} 2\n",
+		"tuwunel_appservice_queued_events{appservice=\"bridge\"} 7\n",
+		"tuwunel_appservice_ping_total{appservice=\"bridge\",result=\"bad_response\"} 1\n",
+		"tuwunel_appservice_ping_total{appservice=\"_other\",result=\"ok\"} 11\n",
+		"tuwunel_metrics_series_overflow_total{family=\"tuwunel_appservice_ping_total\"} 11\n",
+	] {
+		assert!(text.contains(line), "{line}\n{text}");
+	}
+
+	assert!(parsed.samples <= registry.max_series());
 }

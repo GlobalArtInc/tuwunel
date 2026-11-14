@@ -10,6 +10,17 @@ pub(super) struct Control {
 	pub done: Sender<Result>,
 }
 
+/// Counts the events queued for an appservice, up to `cap`.
+///
+/// The walk reads at most `cap` keys. Events in a transaction in flight are
+/// not counted.
+#[implement(Service)]
+pub async fn queued_for(&self, id: &str, cap: usize) -> Result<usize> {
+	self.db
+		.queued_for(&Destination::Appservice(id.to_owned()), cap)
+		.await
+}
+
 /// Drop durable and suppressed work for one pusher.
 ///
 /// The sender serializes deletion against queue promotion. Already claimed

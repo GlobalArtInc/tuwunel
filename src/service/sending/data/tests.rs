@@ -325,3 +325,38 @@ fn ordered_destinations(
 		.sorted_unstable_by(|a, b| a.0.cmp(&b.0))
 		.map(|(_, dest)| dest)
 }
+
+#[tokio::test]
+async fn queue_depth_counts_one_destination_up_to_the_cap() -> Result {
+	let Some(fixture) = fixture(Figment::new()).await? else {
+		return Ok(());
+	};
+
+	let sending = &fixture.services.sending;
+	let data = &sending.db;
+	let rows = [
+		(delimited(b"+bridge"), 5),
+		(delimited(b"+bridge2"), 3),
+		(delimited(b"bridge.example"), 4),
+	];
+
+	{
+		let _cork = data.db.cork();
+
+		for (prefix, count) in &rows {
+			for row in 0..*count {
+				data.servernameevent_data
+					.insert(&row_key(prefix, row), b"unusable event value");
+			}
+		}
+	}
+
+	for (cap, expected) in [(0, 0), (1, 1), (4, 4), (5, 5), (6, 5), (100_000, 5)] {
+		assert_eq!(sending.queued_for("bridge", cap).await?, expected, "cap {cap}");
+	}
+
+	assert_eq!(sending.queued_for("bridge2", 100).await?, 3);
+	assert_eq!(sending.queued_for("absent", 100).await?, 0);
+
+	Ok(())
+}

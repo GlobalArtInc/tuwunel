@@ -6,6 +6,7 @@
 //! Reading takes no locks beyond short read locks on open families, and the
 //! text format is Prometheus 0.0.4.
 
+mod appservice;
 mod family;
 mod http;
 mod inventory;
@@ -20,6 +21,7 @@ mod types;
 mod write;
 
 pub use self::{
+	appservice::{APPSERVICE_CAP, Appservice, SendResult},
 	family::{DynFamily, EnumFamily, LabelSet, MAX_KEY_LEN, OTHER},
 	http::{Api, Http, InFlight, Method, ROUTE_CAP, StatusClass, UNMATCHED},
 	inventory::Inventory,
@@ -61,6 +63,9 @@ pub struct Registry {
 
 	/// The RocksDB engine.
 	pub rocksdb: Rocksdb,
+
+	/// Delivery to appservices.
+	pub appservice: Appservice,
 }
 
 impl Registry {
@@ -79,6 +84,7 @@ impl Registry {
 		self.pool.write(&mut w);
 		self.inventory.write(&mut w);
 		self.rocksdb.write(&mut w);
+		self.appservice.write(&mut w);
 
 		w.finish()
 	}
@@ -98,6 +104,7 @@ impl Registry {
 			self.pool.series(),
 			self.inventory.series(),
 			self.rocksdb.series(),
+			self.appservice.series(),
 		]
 		.into_iter()
 		.fold(0, usize::saturating_add)

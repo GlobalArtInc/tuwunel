@@ -1,13 +1,16 @@
 use std::{cmp::Reverse, iter::once, time::Duration};
 
 use futures::StreamExt;
-use tokio::time::{Instant, sleep_until};
-use tuwunel_core::{Error, Result};
+use tokio::{
+	net::TcpListener,
+	time::{Instant, sleep_until},
+};
+use tuwunel_core::{Error, Result, metrics::prom::SendResult};
 
 use super::{
 	SendingFutures, TransactionStatus, WakeQueue, completion, enqueue, fixture::fixture, pdu_id,
 };
-use crate::sending::{Destination, SendingEvent};
+use crate::sending::{Destination, SendingEvent, sender::dispatch::appservice::classify};
 
 #[tokio::test]
 async fn missing_appservice_registration_retries_on_its_timer_and_preserves_rows() -> Result {
@@ -220,4 +223,39 @@ async fn very_large_appservice_failure_streak_is_capped_and_deduped() -> Result 
 	assert!(futures.is_empty());
 
 	Ok(())
+}
+
+#[tokio::test]
+async fn failed_requests_are_classified_by_how_they_failed() {
+	let listener = TcpListener::bind("127.0.0.1:0")
+		.await
+		.expect("bind a listener that never answers");
+
+	let url = format!("http://{}/", listener.local_addr().expect("local address"));
+	let silent = reqwest::Client::builder()
+		.timeout(Duration::from_millis(100))
+		.build()
+		.expect("client");
+
+	let timed_out = silent
+		.get(&url)
+		.send()
+		.await
+		.expect_err("the listener never answers");
+
+	drop(listener);
+
+	let refused = silent
+		.get(&url)
+		.send()
+		.await
+		.expect_err("nothing listens any more");
+
+	assert_eq!(classify(&timed_out.into()), SendResult::Timeout);
+	assert_eq!(classify(&refused.into()), SendResult::Network);
+	assert_eq!(
+		classify(&Error::BadServerResponse("status 500".into())),
+		SendResult::BadResponse
+	);
+	assert_eq!(classify(&Error::bad_database("not a transport error")), SendResult::Other);
 }

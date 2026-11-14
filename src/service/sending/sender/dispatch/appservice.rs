@@ -1,6 +1,7 @@
 use std::{
 	collections::{BTreeMap, BTreeSet},
 	str::from_utf8,
+	time::Instant,
 };
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -15,8 +16,9 @@ use ruma::{
 };
 use serde::Deserialize;
 use tuwunel_core::{
-	debug_warn, err, implement,
+	Error, Result, debug_warn, err, implement,
 	itertools::Itertools,
+	metrics::prom::SendResult,
 	smallvec::SmallVec,
 	utils::{
 		IterStream, ReadyExt, calculate_hash,
@@ -187,14 +189,50 @@ pub(super) async fn send_events_dest_appservice(
 		device_unused_fallback_key_types,
 	};
 
-	match self
+	let started = Instant::now();
+	let sent = self
 		.services
 		.appservice
 		.send_request(info.registration, request)
-		.await
+		.await;
+
+	if let Some(registry) = self.server.metrics.prometheus()
+		&& let Some(result) = send_result(&sent)
 	{
+		registry
+			.appservice
+			.transaction(&id, result, started.elapsed());
+	}
+
+	match sent {
 		| Ok(_) => Ok(Destination::Appservice(id)),
 		| Err(e) => Err((Destination::Appservice(id), e)),
+	}
+}
+
+/// Classifies the outcome of sending a transaction for the metrics.
+///
+/// A registration without a URL sends nothing, so it has no outcome.
+fn send_result<T>(sent: &Result<Option<T>>) -> Option<SendResult> {
+	match sent {
+		| Ok(Some(_)) => Some(SendResult::Ok),
+		| Ok(None) => None,
+		| Err(e) => Some(classify(e)),
+	}
+}
+
+/// Classifies a failed request to an appservice.
+///
+/// Transport errors split into timeouts and the rest. Every other failure of
+/// the request is a bad response: a status outside 2xx, an unreadable body, or
+/// one that does not parse. They are not told apart here because the request
+/// reports them all alike.
+pub(in crate::sending::sender) fn classify(error: &Error) -> SendResult {
+	match error {
+		| Error::Reqwest(e) if e.is_timeout() => SendResult::Timeout,
+		| Error::Reqwest(_) => SendResult::Network,
+		| Error::BadServerResponse(_) => SendResult::BadResponse,
+		| _ => SendResult::Other,
 	}
 }
 
