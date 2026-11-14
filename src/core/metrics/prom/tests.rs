@@ -1,11 +1,12 @@
-use std::{collections::BTreeSet, sync::Arc, thread, time::Duration};
+use std::{collections::BTreeSet, future::pending, sync::Arc, thread, time::Duration};
 
+use futures::FutureExt;
 use regex::Regex;
 
 use super::{
-	APPSERVICE_CAP, CacheSample, Condition, Counter, DynFamily, EnumFamily, Gauge, Histogram,
-	MAX_KEY_LEN, Metric, OTHER, Op, PROVIDER_CAP, Registry, RocksSample, Scale, SendResult,
-	Writer,
+	APPSERVICE_CAP, Api, CacheSample, Condition, Counter, DynFamily, EnumFamily, Fastpath, Gauge,
+	Histogram, MAX_KEY_LEN, Metric, OTHER, Op, PROVIDER_CAP, Registry, Reply, RocksSample, Scale,
+	SendResult, SinceKind, Writer,
 };
 use crate::label_set;
 
@@ -560,5 +561,60 @@ fn storage_operations_are_counted_per_provider_and_op() {
 		"{text}"
 	);
 	assert!(parse(&text).samples <= registry.max_series());
+	assert!(parsed.samples <= registry.max_series());
+}
+
+#[test]
+fn sync_v3_is_counted_per_verdict_and_a_long_poll_leaves_with_its_guard() {
+	let registry = Registry::new();
+	let group = &registry.sync;
+
+	group.v3_rooms(Fastpath::Quiet, 3);
+	group.v3_rooms(Fastpath::BusyTimeline, 1);
+	group.v3_rooms_per_sync(4);
+	group.v3_answered(SinceKind::Initial, Reply::Data);
+	group.v3_answered(SinceKind::Incremental, Reply::Empty);
+	drop(group.v3_build(SinceKind::Incremental));
+	group.fastpath_mismatch();
+
+	assert_eq!(group.v3_rooms_counted(Fastpath::Quiet), 3);
+	assert_eq!(group.v3_rooms_counted(Fastpath::Off), 0);
+	assert_eq!(group.v3_answers(SinceKind::Initial, Reply::Data), 1);
+	assert_eq!(group.v3_answers(SinceKind::Initial, Reply::Empty), 0);
+	assert_eq!(group.v3_builds(SinceKind::Incremental), 1);
+	assert_eq!(group.v3_builds(SinceKind::Initial), 0);
+
+	let mut waiting = Box::pin(async {
+		let _poll = group.long_poll(Api::V3);
+
+		pending::<()>().await;
+	});
+
+	assert!(waiting.as_mut().now_or_never().is_none());
+	assert_eq!(group.long_polling(Api::V3), 1);
+	assert_eq!(group.long_polling(Api::V5), 0);
+
+	drop(waiting);
+
+	assert_eq!(group.long_polling(Api::V3), 0);
+
+	let text = registry.render();
+	let parsed = parse(&text);
+
+	for line in [
+		"tuwunel_sync_v3_rooms_total{fastpath=\"quiet\"} 3\n",
+		"tuwunel_sync_v3_rooms_total{fastpath=\"busy_timeline\"} 1\n",
+		"tuwunel_sync_v3_rooms_total{fastpath=\"off\"} 0\n",
+		"tuwunel_sync_v3_responses_total{since=\"initial\",outcome=\"data\"} 1\n",
+		"tuwunel_sync_v3_responses_total{since=\"incremental\",outcome=\"empty\"} 1\n",
+		"tuwunel_sync_v3_build_seconds_count{since=\"incremental\"} 1\n",
+		"tuwunel_sync_v3_rooms_per_sync_bucket{le=\"2\"} 0\n",
+		"tuwunel_sync_v3_rooms_per_sync_bucket{le=\"5\"} 1\n",
+		"tuwunel_sync_fastpath_mismatches_total 1\n",
+		"tuwunel_sync_long_polls{api=\"v3\"} 0\n",
+	] {
+		assert!(text.contains(line), "{line}\n{text}");
+	}
+
 	assert!(parsed.samples <= registry.max_series());
 }

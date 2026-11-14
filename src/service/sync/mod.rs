@@ -216,6 +216,10 @@ impl crate::Service for Service {
 pub fn note_fastpath_mismatch(&self) {
 	self.fastpath_mismatches
 		.fetch_add(1, Ordering::Relaxed);
+
+	if let Some(registry) = self.services.server.metrics.prometheus() {
+		registry.sync.fastpath_mismatch();
+	}
 }
 
 #[implement(Service)]

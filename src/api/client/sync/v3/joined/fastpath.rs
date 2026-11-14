@@ -5,7 +5,10 @@ use ruma::{
 	DeviceId, OwnedEventId, OwnedRoomId, OwnedUserId, RoomId, UserId,
 	api::client::{filter::FilterDefinition, sync::sync_events::v3::JoinedRoom},
 };
-use tuwunel_core::{Error, Result, debug, error};
+use tuwunel_core::{
+	Error, Result, debug, error,
+	metrics::prom::{Fastpath, SyncMetrics},
+};
 use tuwunel_service::Services;
 
 use super::{
@@ -34,6 +37,23 @@ pub(in super::super) enum Verdict {
 	Off,
 	Quiet,
 	Busy(Busy),
+}
+
+impl Verdict {
+	pub(in super::super) const fn label(self) -> Fastpath {
+		match self {
+			| Self::Off => Fastpath::Off,
+			| Self::Quiet => Fastpath::Quiet,
+			| Self::Busy(Busy::Timeline) => Fastpath::BusyTimeline,
+			| Self::Busy(Busy::NoTimelineCount) => Fastpath::BusyNoTimelineCount,
+			| Self::Busy(Busy::Typing) => Fastpath::BusyTyping,
+			| Self::Busy(Busy::PrivateRead) => Fastpath::BusyPrivateRead,
+			| Self::Busy(Busy::AccountData) => Fastpath::BusyAccountData,
+			| Self::Busy(Busy::Receipts) => Fastpath::BusyReceipts,
+			| Self::Busy(Busy::Notifications) => Fastpath::BusyNotifications,
+			| Self::Busy(Busy::Error) => Fastpath::BusyError,
+		}
+	}
 }
 
 #[derive(Default)]
@@ -66,6 +86,25 @@ impl Tally {
 
 				*count = count.saturating_add(1);
 			},
+		}
+	}
+
+	pub(in super::super) fn publish(&self, metrics: &SyncMetrics) {
+		let busy = self
+			.busy
+			.values()
+			.fold(0_usize, |total, rooms| total.saturating_add(*rooms));
+		let rooms = self
+			.off
+			.saturating_add(self.quiet)
+			.saturating_add(busy);
+
+		metrics.v3_rooms_per_sync(to_u64(rooms));
+		add(metrics, Verdict::Off, self.off);
+		add(metrics, Verdict::Quiet, self.quiet);
+
+		for (busy, rooms) in &self.busy {
+			add(metrics, Verdict::Busy(*busy), *rooms);
 		}
 	}
 
@@ -374,6 +413,14 @@ impl Round<'_> {
 			.await
 	}
 }
+
+fn add(metrics: &SyncMetrics, verdict: Verdict, rooms: usize) {
+	if rooms > 0 {
+		metrics.v3_rooms(verdict.label(), to_u64(rooms));
+	}
+}
+
+fn to_u64(rooms: usize) -> u64 { u64::try_from(rooms).unwrap_or(u64::MAX) }
 
 fn with_verdict(verdict: Verdict) -> impl FnOnce(Loaded) -> Outcome {
 	move |(room, dlu, leu)| (room, dlu, leu, verdict)

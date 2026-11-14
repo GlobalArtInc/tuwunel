@@ -6,7 +6,8 @@ use futures::future::join;
 use serde_json::{Map, Value, json};
 use tuwunel::{Args, Runtime, Server, async_run, async_start, async_stop};
 use tuwunel_core::{
-	Result, implement,
+	Result, err, implement,
+	metrics::prom::{Api, Fastpath, Reply, SinceKind},
 	ruma::{MilliSecondsSinceUnixEpoch, RoomId, events::receipt::ReceiptThread},
 };
 use tuwunel_service::{Services, rooms::read_receipt::PrivateRead, users::DeviceListChange};
@@ -69,6 +70,9 @@ fn run(option: &str, verify: bool) -> Result {
 
 	let runtime = Runtime::new(Some(&args))?;
 	let server = Server::new(Some(&args), Some(&runtime))?;
+
+	server.server.metrics.enable_prometheus();
+
 	let result = runtime.block_on(async {
 		let services = async_start(&server).await?;
 		let base = format!("http://127.0.0.1:{port}");
@@ -287,10 +291,44 @@ async fn exercise(services: &Services, base: &str, verify: bool) -> Result {
 		.sees("unread_thread_notifications", later.as_str())
 		.await?;
 
+	finish(services, verify)
+}
+
+fn finish(services: &Services, verify: bool) -> Result {
 	require(
 		!verify || services.sync.fastpath_mismatches() == 0,
 		"the verification mode recorded a mismatch",
-	)
+	)?;
+
+	let registry = services
+		.server
+		.metrics
+		.prometheus()
+		.ok_or_else(|| err!("the metrics registry is off"))?;
+	let sync = &registry.sync;
+
+	require(
+		sync.fastpath_mismatches() == services.sync.fastpath_mismatches(),
+		"the mismatch metric differs from the service counter",
+	)?;
+
+	require(
+		sync.v3_rooms_counted(Fastpath::Quiet) > 0
+			&& sync.v3_rooms_counted(Fastpath::BusyTimeline) > 0,
+		"the room verdicts were not counted",
+	)?;
+
+	require(
+		sync.v3_builds(SinceKind::Initial) > 0 && sync.v3_builds(SinceKind::Incremental) > 0,
+		"the builds were not timed",
+	)?;
+
+	require(
+		sync.v3_answers(SinceKind::Incremental, Reply::Data) > 0,
+		"the data responses were not counted",
+	)?;
+
+	require(sync.long_polling(Api::V3) == 0, "a long poll was left in the gauge")
 }
 
 struct Watch<'a> {

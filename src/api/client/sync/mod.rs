@@ -17,6 +17,7 @@ use ruma::{
 };
 use tuwunel_core::{
 	Error, Result, debug_warn, is_equal_to,
+	metrics::prom::{Api, LongPoll},
 	utils::{
 		result::{LogErr, NotFound},
 		time::now_millis,
@@ -31,6 +32,14 @@ use tuwunel_service::{Services, users::InviteFilter};
 
 pub use self::v3::calculate_heroes;
 pub(crate) use self::{v3::sync_events_route, v5::sync_events_v5_route};
+
+fn long_poll(services: &Services, api: Api) -> Option<LongPoll<'_>> {
+	services
+		.server
+		.metrics
+		.prometheus()
+		.map(|registry| registry.sync.long_poll(api))
+}
 
 #[derive(Clone, Copy)]
 enum TimelineErrors {

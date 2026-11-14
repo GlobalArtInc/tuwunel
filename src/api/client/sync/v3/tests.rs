@@ -5,15 +5,19 @@ use ruma::{
 	api::client::sync::sync_events::v3::{State as RoomState, StateEvents},
 	uint,
 };
+use tuwunel_core::metrics::prom::Registry;
 
 use super::{
 	Since, StateAfter, capped_timeline_limit,
-	joined::notifications::{
-		GateInputs, Gates as NotificationGates,
-		assemble_threads as assemble_thread_notifications,
-		assemble_unread as assemble_unread_notifications,
-		compute_gates as compute_notification_gates, in_window, quiet_counts_reported,
-		send_thread_counts,
+	joined::{
+		fastpath::{Busy, Verdict},
+		notifications::{
+			GateInputs, Gates as NotificationGates,
+			assemble_threads as assemble_thread_notifications,
+			assemble_unread as assemble_unread_notifications,
+			compute_gates as compute_notification_gates, in_window, quiet_counts_reported,
+			send_thread_counts,
+		},
 	},
 	stale_since,
 };
@@ -383,4 +387,37 @@ fn since_is_never_stale_with_a_zero_gap() {
 fn since_from_the_future_is_not_stale() {
 	assert!(!stale_since(1000, 5000, 100));
 	assert!(!stale_since(0, u64::MAX, 1));
+}
+
+#[test]
+fn every_fastpath_verdict_has_its_own_label() {
+	let verdicts = [
+		Verdict::Off,
+		Verdict::Quiet,
+		Verdict::Busy(Busy::Timeline),
+		Verdict::Busy(Busy::NoTimelineCount),
+		Verdict::Busy(Busy::Typing),
+		Verdict::Busy(Busy::PrivateRead),
+		Verdict::Busy(Busy::AccountData),
+		Verdict::Busy(Busy::Receipts),
+		Verdict::Busy(Busy::Notifications),
+		Verdict::Busy(Busy::Error),
+	];
+
+	let registry = Registry::new();
+	for verdict in verdicts {
+		registry.sync.v3_rooms(verdict.label(), 1);
+	}
+
+	let text = registry.render();
+	let counted = text
+		.lines()
+		.filter(|line| line.starts_with("tuwunel_sync_v3_rooms_total{"))
+		.collect::<Vec<_>>();
+
+	assert_eq!(counted.len(), verdicts.len(), "a label is shared or missing: {counted:?}");
+	assert!(
+		counted.iter().all(|line| line.ends_with(" 1")),
+		"each verdict counts in its own series: {counted:?}"
+	);
 }

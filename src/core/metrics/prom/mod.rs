@@ -16,6 +16,7 @@ mod process;
 mod rocksdb;
 mod runtime;
 mod storage;
+mod sync;
 #[cfg(test)]
 mod tests;
 mod types;
@@ -32,6 +33,7 @@ pub use self::{
 	rocksdb::{CacheSample, Condition, POOL_CAP, RocksSample, Rocksdb},
 	runtime::{Runtime, RuntimeSample},
 	storage::{Op, PROVIDER_CAP, Storage, StoreResult},
+	sync::{Fastpath, LongPoll, Reply, SinceKind, SyncMetrics},
 	types::{Counter, Gauge, Histogram, Metric, Seen, Timer},
 	write::{Kind, Le, Scale, Value, Writer, push_label},
 };
@@ -71,6 +73,9 @@ pub struct Registry {
 
 	/// Object-storage providers.
 	pub storage: Storage,
+
+	/// The sync endpoints.
+	pub sync: SyncMetrics,
 }
 
 impl Registry {
@@ -91,6 +96,7 @@ impl Registry {
 		self.rocksdb.write(&mut w);
 		self.appservice.write(&mut w);
 		self.storage.write(&mut w);
+		self.sync.write(&mut w);
 
 		w.finish()
 	}
@@ -112,6 +118,7 @@ impl Registry {
 			self.rocksdb.series(),
 			self.appservice.series(),
 			self.storage.series(),
+			self.sync.series(),
 		]
 		.into_iter()
 		.fold(0, usize::saturating_add)

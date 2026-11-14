@@ -31,7 +31,9 @@ use tuwunel_core::{
 	Result, at, debug,
 	debug::INFO_SPAN_LEVEL,
 	error::inspect_log,
-	extract_variant, trace,
+	extract_variant,
+	metrics::prom::{Api, Registry, Reply, SinceKind},
+	trace,
 	utils::{
 		BoolExt, IterStream, ReadyExt, TryFutureExtExt,
 		option::OptionExt,
@@ -42,7 +44,9 @@ use tuwunel_matrix::event::Matches;
 use tuwunel_service::{Services, presence::Ping, users::InviteFilter};
 
 use super::{
-	super::{invite_permitted, profiles::collect as collect_profiles, share_encrypted_room},
+	super::{
+		invite_permitted, long_poll, profiles::collect as collect_profiles, share_encrypted_room,
+	},
 	Since, StateAfter, capped_timeline_limit,
 	joined::fastpath::{Tally, load_room_or_skip},
 	left::collect_rooms as collect_left_rooms,
@@ -169,6 +173,18 @@ pub(crate) async fn sync_events_route(
 		| since => since,
 	};
 
+	let registry = services.server.metrics.prometheus();
+	let kind = match since {
+		| Since::Initial => SinceKind::Initial,
+		| Since::Count(_) | Since::Foreign => SinceKind::Incremental,
+	};
+
+	let answered = |reply| {
+		if let Some(registry) = registry {
+			registry.sync.v3_answered(kind, reply);
+		}
+	};
+
 	let mut since = match since {
 		| Since::Initial => None,
 		| Since::Count(since) => Some(since),
@@ -183,9 +199,12 @@ pub(crate) async fn sync_events_route(
 				"foreign since token"
 			);
 
-			return Ok(
-				build_foreign_response(&services, sender_user, sender_device, next_batch).await
-			);
+			let response =
+				build_foreign_response(&services, sender_user, sender_device, next_batch).await;
+
+			answered(Reply::Foreign);
+
+			return Ok(response);
 		},
 	};
 
@@ -224,7 +243,7 @@ pub(crate) async fn sync_events_route(
 
 		if since.is_none_or(|since| since < next_batch) || full_state {
 			let capped = capped_filter.take();
-			let response = build_sync_events(Params {
+			let response = build_timed(registry, kind, Params {
 				services: &services,
 				sender_user,
 				sender_device,
@@ -244,14 +263,24 @@ pub(crate) async fn sync_events_route(
 				&& response.users.is_empty();
 
 			if !empty || full_state {
+				answered(Reply::Data);
+
 				return Ok(response);
 			}
 		}
 
 		// Wait for activity
-		if timeout_at(stop_at, watchers).await.is_err() || services.server.is_stopping() {
+		let timed_out = {
+			let _long_poll = long_poll(&services, Api::V3);
+
+			timeout_at(stop_at, watchers).await.is_err()
+		};
+
+		if timed_out || services.server.is_stopping() {
 			let response =
 				build_empty_response(&services, sender_user, sender_device, next_batch).await;
+
+			answered(Reply::Empty);
 
 			trace!(target: "tuwunel_api_client::sync::v3", ?since, next_batch, "empty response");
 			return Ok(response);
@@ -267,6 +296,16 @@ pub(crate) async fn sync_events_route(
 
 		since = Some(next_batch);
 	}
+}
+
+async fn build_timed(
+	registry: Option<&Registry>,
+	kind: SinceKind,
+	params: Params<'_>,
+) -> Result<Response> {
+	let _timer = registry.map(|registry| registry.sync.v3_build(kind));
+
+	build_sync_events(params).await
 }
 
 async fn initial_capped_filter(
@@ -581,6 +620,10 @@ fn collect_joined_rooms<'a>(
 		)
 		.map(move |(joined_rooms, device_list_updates, left_encrypted_users, tally)| {
 			tally.log(since, next_batch);
+
+			if let Some(registry) = services.server.metrics.prometheus() {
+				tally.publish(&registry.sync);
+			}
 
 			(joined_rooms, device_list_updates, left_encrypted_users)
 		})
