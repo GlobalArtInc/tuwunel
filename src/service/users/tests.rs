@@ -10,7 +10,11 @@ use ruma::{
 };
 use serde_json::{Value, from_value, json};
 use tokio::sync::Notify;
-use tuwunel_core::{Result, config::Figment, utils::to_canonical_object};
+use tuwunel_core::{
+	Result,
+	config::Figment,
+	utils::{result::NotFound, to_canonical_object},
+};
 use tuwunel_database::{Cbor, Deserialized, Json, serialize_key};
 
 use super::{PASSWORD_SENTINEL, Service, device::DeviceLock};
@@ -323,6 +327,57 @@ async fn device_key_upload_holds_the_device_lock() -> Result {
 	assert!(!keyid_key.contains(&(user_id, removed_id)).await);
 
 	Ok(())
+}
+
+#[tokio::test]
+async fn device_creation_announces_only_a_device_with_keys() -> Result {
+	let Some(fixture) = fixture(Figment::new()).await? else {
+		return Ok(());
+	};
+
+	let users = &fixture.services.users;
+	let user_id = user_id!("@announce-device:localhost");
+	let (first, second) = (device_id!("FIRST"), device_id!("SECOND"));
+	let keys = from_value(json!({"user_id": user_id, "device_id": first, "keys": {}}))?;
+
+	create_devices(users, user_id, &[first]).await?;
+
+	assert_eq!(
+		announced(users, user_id).await?,
+		(0, 0),
+		"a device without keys is not announced"
+	);
+
+	users
+		.add_device_keys(user_id, first, &keys)
+		.await?;
+
+	assert_eq!(announced(users, user_id).await?, (1, 1), "the keys announce the device");
+
+	users
+		.create_device(user_id, Some(first), (None, None), None, None, None)
+		.await?;
+
+	assert_eq!(announced(users, user_id).await?, (2, 2), "a login of a device with keys");
+
+	users
+		.create_device(user_id, Some(second), (None, None), None, None, None)
+		.await?;
+
+	assert_eq!(announced(users, user_id).await?, (2, 2), "a second device without keys");
+
+	Ok(())
+}
+
+async fn announced(users: &Service, user_id: &UserId) -> Result<(usize, u64)> {
+	let records = users.keys_changed(user_id, 0, None).count().await;
+	let version = users
+		.get_devicelist_version(user_id)
+		.await
+		.optional()?
+		.unwrap_or_default();
+
+	Ok((records, version))
 }
 
 #[tokio::test]

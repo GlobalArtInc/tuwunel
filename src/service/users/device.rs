@@ -18,6 +18,7 @@ use tuwunel_core::{
 		BoolExt, MutexMapGuard, OptionExt, ReadyExt,
 		future::OptionFutureExt,
 		random_string,
+		result::NotFound,
 		stream::{BroadbandExt, IterStream, TryIgnore, automatic_width},
 		string::to_small_string,
 		time::{
@@ -78,7 +79,10 @@ pub async fn create_device(
 
 	let lock = self.lock_device(user_id, &device_id).await;
 
-	let notify = true;
+	let notify = !self
+		.get_device_keys(user_id, &device_id)
+		.await
+		.is_missing();
 
 	self.put_device_metadata(user_id, notify, &Device {
 		device_id: device_id.clone(),

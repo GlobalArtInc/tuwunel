@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use serde_json::{Value, json};
+use serde_json::{Value, from_value, json};
 use tuwunel_core::{
 	Result, err,
 	utils::{BoolExt, future::ExtExt},
@@ -103,9 +103,16 @@ async fn exercise_e2ee(services: &Services, base: &str) -> Result {
 
 	let pos = field(&uploaded, "pos")?;
 
-	services
+	let device = services
 		.users
 		.create_device(&user, None, (None, None), None, None, None)
+		.await?;
+
+	let keys = from_value(json!({ "user_id": user, "device_id": device, "keys": {} }))?;
+
+	services
+		.users
+		.add_device_keys(&user, &device, &keys)
 		.await?;
 
 	let (response, waited) = reader

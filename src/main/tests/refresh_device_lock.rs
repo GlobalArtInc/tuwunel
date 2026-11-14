@@ -10,7 +10,7 @@ use tokio::time::{sleep, timeout};
 use tuwunel_core::{
 	Err, Result, err,
 	ruma::{DeviceId, OwnedUserId, UserId, api::error::ErrorKind, device_id},
-	utils::time::now_secs,
+	utils::{result::NotFound, time::now_secs},
 };
 use tuwunel_service::{
 	Services,
@@ -382,7 +382,9 @@ async fn metadata_updates_keep_removal(services: &Services) -> Result {
 	let created = services
 		.users
 		.get_devicelist_version(&user)
-		.await?;
+		.await
+		.optional()?
+		.unwrap_or_default();
 
 	services
 		.users

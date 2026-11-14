@@ -104,7 +104,7 @@ async fn exercise(services: &Services, base: &str) -> Result {
 		.get_devicelist_version(&user)
 		.await?;
 
-	assert_eq!(version, 3);
+	assert_eq!(version, 2);
 
 	let auth = json!({"auth": {"type": "m.login.password",
 		"identifier": {"type": "m.id.user", "user": user}, "password": "record-password"}});
@@ -125,9 +125,8 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	assert_eq!(records, [
 		(Device(device()), 1),
 		(Device(device()), 2),
-		(Device(device()), 3),
-		(CrossSigning, 3),
-		(Deleted(device()), 4)
+		(CrossSigning, 2),
+		(Deleted(device()), 3)
 	]);
 
 	let version = services
@@ -135,7 +134,7 @@ async fn exercise(services: &Services, base: &str) -> Result {
 		.get_devicelist_version(&user)
 		.await?;
 
-	assert_eq!(version, 4);
+	assert_eq!(version, 3);
 
 	let absent = services.users.device_list_change(u64::MAX).await;
 
