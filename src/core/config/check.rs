@@ -69,6 +69,8 @@ pub fn reload(old: &Config, new: &Config) -> Result {
 		));
 	}
 
+	let restart_keys = metrics_restart_keys(old, new);
+
 	let old = &old.telemetry.sentry;
 	let new = &new.telemetry.sentry;
 
@@ -88,7 +90,30 @@ pub fn reload(old: &Config, new: &Config) -> Result {
 		));
 	}
 
+	if !restart_keys.is_empty() {
+		warn!(
+			"{} changed in the reloaded configuration; the metrics listener keeps its previous \
+			 state and the change applies after a restart.",
+			restart_keys.join(", ")
+		);
+	}
+
 	Ok(())
+}
+
+/// Returns the `metrics` keys a reload changed that only take effect when the
+/// server starts.
+pub(super) fn metrics_restart_keys(old: &Config, new: &Config) -> Vec<&'static str> {
+	let (old, new) = (&old.metrics, &new.metrics);
+
+	[
+		(old.enable != new.enable, "metrics.enable"),
+		(old.address != new.address, "metrics.address"),
+		(old.port != new.port, "metrics.port"),
+	]
+	.into_iter()
+	.filter_map(|(changed, key)| changed.then_some(key))
+	.collect()
 }
 
 /// Validates a complete server configuration.
@@ -106,6 +131,7 @@ pub fn check(config: &Config) -> Result {
 	warn_unknown_key(config)?;
 
 	check_observability(config)?;
+	check_metrics(config)?;
 	check_network(config)?;
 	check_storage(config)?;
 	check_registration(config)?;
@@ -157,6 +183,76 @@ fn check_observability(config: &Config) -> Result {
 	}
 
 	Ok(())
+}
+
+fn check_metrics(config: &Config) -> Result {
+	let metrics = &config.metrics;
+
+	if metrics
+		.bearer_token
+		.as_ref()
+		.is_some_and(String::is_empty)
+	{
+		return Err!(Config(
+			"metrics.bearer_token",
+			"Metrics bearer token was specified but is empty (\"\")"
+		));
+	}
+
+	if metrics.bearer_token.is_some() && metrics.bearer_token_file.is_some() {
+		return Err!(Config(
+			"metrics.bearer_token_file",
+			"metrics.bearer_token and metrics.bearer_token_file are mutually exclusive; set \
+			 only one of them"
+		));
+	}
+
+	if metrics.collect_interval == 0 {
+		return Err!(Config("metrics.collect_interval", "must be at least 1 second"));
+	}
+
+	if !metrics.enable {
+		return Ok(());
+	}
+
+	if let Some(path) = &metrics.bearer_token_file {
+		let token = read_to_string(path).map_err(|e| {
+			err!(Config(
+				"metrics.bearer_token_file",
+				"Failed to read the metrics bearer token file: {e}"
+			))
+		})?;
+
+		if token.trim().is_empty() {
+			return Err!(Config(
+				"metrics.bearer_token_file",
+				"Metrics bearer token file is empty"
+			));
+		}
+	}
+
+	if config.listening
+		&& config
+			.get_bind_addrs()
+			.iter()
+			.any(|addr| listener_overlaps(addr, metrics.address, metrics.port))
+	{
+		return Err!(Config(
+			"metrics.port",
+			"metrics.address {} collides with an http.listen address; choose another port for \
+			 the metrics listener",
+			SocketAddr::new(metrics.address, metrics.port)
+		));
+	}
+
+	Ok(())
+}
+
+fn listener_overlaps(listen: &SocketAddr, address: IpAddr, port: u16) -> bool {
+	listen.port() == port
+		&& (listen.ip() == address
+			|| (listen.is_ipv4() == address.is_ipv4()
+				&& (listen.ip().is_unspecified() || address.is_unspecified())))
 }
 
 fn check_profile_requests(config: &Config) -> Result {

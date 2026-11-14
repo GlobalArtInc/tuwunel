@@ -114,6 +114,10 @@ where
 }
 
 fn check_with_captured_logs(config: &Config) -> (Result, String) {
+	run_with_captured_logs(|| check(config))
+}
+
+fn run_with_captured_logs(run: impl FnOnce() -> Result) -> (Result, String) {
 	static INIT: Once = Once::new();
 
 	// Installed once, process-wide for the whole test binary, since a per-test
@@ -131,7 +135,7 @@ fn check_with_captured_logs(config: &Config) -> (Result, String) {
 	let captured = Arc::new(Mutex::new(Vec::new()));
 	CAPTURE.with_borrow_mut(|sink| *sink = Some(Arc::clone(&captured)));
 
-	let result = check(config);
+	let result = run();
 	CAPTURE.with_borrow_mut(|sink| *sink = None);
 
 	let logs = String::from_utf8(
@@ -1884,7 +1888,7 @@ fn jwt_key_conversions_refuse_an_empty_key() {
 /// "varies by system" and non-literal bodies are out of reach here.
 #[test]
 fn documented_defaults_match_the_code() {
-	const SOURCES: [&str; 30] = [
+	const SOURCES: [&str; 31] = [
 		include_str!("mod.rs"),
 		include_str!("rocksdb.rs"),
 		include_str!("cache.rs"),
@@ -1907,6 +1911,7 @@ fn documented_defaults_match_the_code() {
 		include_str!("compatibility.rs"),
 		include_str!("configuration.rs"),
 		include_str!("logging.rs"),
+		include_str!("metrics.rs"),
 		include_str!("presence.rs"),
 		include_str!("push.rs"),
 		include_str!("read_receipts.rs"),
@@ -2029,4 +2034,261 @@ fn int_literal(token: &str) -> Option<u64> {
 	INT_SUFFIX
 		.contains(&suffix)
 		.and_then(|| digits.parse().ok())
+}
+
+#[test]
+fn metrics_default_off_on_loopback_with_documented_values() {
+	let default = default_config();
+	let metrics = &default.metrics;
+
+	assert!(!metrics.enable);
+	assert_eq!(metrics.address, "127.0.0.1".parse::<IpAddr>().unwrap());
+	assert_eq!(metrics.port, 9149);
+	assert!(metrics.bearer_token.is_none());
+	assert!(metrics.bearer_token_file.is_none());
+	assert_eq!(metrics.collect_interval, 15);
+	assert_eq!(metrics.count_interval, 300);
+	check(&default).expect("the default metrics section should pass the check");
+
+	let example = example_config().expect("pristine configuration rendered");
+	for line in [
+		"#[global.metrics]\n",
+		"#enable = false\n",
+		"#address = \"127.0.0.1\"\n",
+		"#port = 9149\n",
+		"#bearer_token =\n",
+		"#bearer_token_file =\n",
+		"#collect_interval = 15\n",
+		"#count_interval = 300\n",
+	] {
+		assert!(example.contains(line), "tuwunel-example.toml lacks {line:?}");
+	}
+}
+
+#[test]
+fn metrics_bearer_token_is_redacted_in_debug_output() {
+	let config = config_from_toml("[global.metrics]\nbearer_token = \"s3cret-scrape-token\"\n")
+		.expect("the config should parse");
+
+	assert!(!format!("{:?}", config.metrics).contains("s3cret-scrape-token"));
+}
+
+#[test]
+fn a_reload_that_changes_a_startup_only_metrics_key_warns() {
+	let old = config_from_toml("[global.metrics]\nenable = false\n").expect("the config parses");
+	let new =
+		config_from_toml("[global.metrics]\nenable = true\naddress = \"0.0.0.0\"\nport = 9150\n")
+			.expect("the config parses");
+
+	assert_eq!(check::metrics_restart_keys(&old, &new), [
+		"metrics.enable",
+		"metrics.address",
+		"metrics.port"
+	]);
+
+	let (result, logs) = run_with_captured_logs(|| reload(&old, &new));
+
+	result.expect("the reload is accepted");
+	assert!(
+		logs.contains("metrics.enable, metrics.address, metrics.port changed")
+			&& logs.contains("applies after a restart"),
+		"{logs}"
+	);
+
+	let (result, logs) = run_with_captured_logs(|| reload(&new, &new));
+
+	result.expect("an unchanged reload is accepted");
+	assert!(!logs.contains("applies after a restart"), "{logs}");
+	assert!(check::metrics_restart_keys(&old, &old).is_empty());
+}
+
+struct TempFile(PathBuf);
+
+impl TempFile {
+	fn new(name: &str, contents: &str) -> Self {
+		let path = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
+		std::fs::write(&path, contents).expect("temporary file written");
+
+		Self(path)
+	}
+}
+
+impl Drop for TempFile {
+	fn drop(&mut self) { std::fs::remove_file(&self.0).ok(); }
+}
+
+#[test]
+fn metrics_settings_are_validated() {
+	let token = TempFile::new("tuwunel-metrics-token", "scrape-token\n");
+	let empty = TempFile::new("tuwunel-metrics-empty", " \n");
+	let token_file = &token.0;
+	let empty_file = &empty.0;
+
+	let listen = |address: &str, port: u16| {
+		format!("[global.http.listen]\naddress = \"{address}\"\nport = {port}\n")
+	};
+
+	let rows = [
+		("[global.metrics]\nenable = true\n".to_owned(), true, ""),
+		(
+			"[global.metrics]\nbearer_token = \"\"\n".to_owned(),
+			false,
+			"metrics.bearer_token",
+		),
+		(
+			format!(
+				"[global.metrics]\nbearer_token = \"a\"\nbearer_token_file = {token_file:?}\n"
+			),
+			false,
+			"metrics.bearer_token_file",
+		),
+		(
+			format!("[global.metrics]\nenable = true\nbearer_token_file = {token_file:?}\n"),
+			true,
+			"",
+		),
+		(
+			format!("[global.metrics]\nenable = true\nbearer_token_file = {empty_file:?}\n"),
+			false,
+			"metrics.bearer_token_file",
+		),
+		(
+			"[global.metrics]\nenable = true\nbearer_token_file = \"/nonexistent/token\"\n"
+				.to_owned(),
+			false,
+			"metrics.bearer_token_file",
+		),
+		(
+			"[global.metrics]\nbearer_token_file = \"/nonexistent/token\"\n".to_owned(),
+			true,
+			"",
+		),
+		(
+			"[global.metrics]\ncollect_interval = 0\n".to_owned(),
+			false,
+			"metrics.collect_interval",
+		),
+		("[global.metrics]\ncount_interval = 0\n".to_owned(), true, ""),
+		(
+			"[global.metrics]\nenable = true\nport = 8008\n".to_owned(),
+			false,
+			"metrics.port",
+		),
+		("[global.metrics]\nport = 8008\n".to_owned(), true, ""),
+		(
+			format!(
+				"{}[global.metrics]\nenable = true\nport = 9000\n",
+				listen("127.0.0.1", 9000)
+			),
+			false,
+			"metrics.port",
+		),
+		(
+			format!(
+				"{}[global.metrics]\nenable = true\naddress = \"127.0.0.1\"\nport = 9000\n",
+				listen("0.0.0.0", 9000)
+			),
+			false,
+			"metrics.port",
+		),
+		(
+			format!(
+				"{}[global.metrics]\nenable = true\naddress = \"127.0.0.2\"\nport = 9000\n",
+				listen("127.0.0.1", 9000)
+			),
+			true,
+			"",
+		),
+		(
+			format!(
+				"{}[global.metrics]\nenable = true\nport = 9001\n",
+				listen("127.0.0.1", 9000)
+			),
+			true,
+			"",
+		),
+		(
+			format!(
+				"{}[global.metrics]\nenable = true\naddress = \"::\"\nport = 9000\n",
+				listen("0.0.0.0", 9000)
+			),
+			true,
+			"",
+		),
+		(
+			format!(
+				"{}[global.metrics]\nenable = true\naddress = \"::1\"\nport = 9000\n",
+				listen("0.0.0.0", 9000)
+			),
+			true,
+			"",
+		),
+		(
+			format!(
+				"{}[global.metrics]\nenable = true\naddress = \"0.0.0.0\"\nport = 9000\n",
+				listen("::1", 9000)
+			),
+			true,
+			"",
+		),
+		(
+			format!(
+				"{}[global.metrics]\nenable = true\naddress = \"0.0.0.0\"\nport = 9000\n",
+				listen("::", 9000)
+			),
+			true,
+			"",
+		),
+		(
+			format!(
+				"{}[global.metrics]\nenable = true\naddress = \"::1\"\nport = 9000\n",
+				listen("::1", 9000)
+			),
+			false,
+			"metrics.port",
+		),
+	];
+
+	for (toml, valid, field) in rows {
+		let config = config_from_toml(&toml).expect("the config should parse");
+
+		assert_verdict(&toml, check(&config), valid, field);
+	}
+}
+
+#[test]
+fn metrics_port_collision_prints_ipv6_with_brackets() {
+	let config = config_from_toml(
+		"[global.http.listen]\naddress = \"::1\"\nport = 9000\n[global.metrics]\nenable = \
+		 true\naddress = \"::1\"\nport = 9000\n",
+	)
+	.expect("the config should parse");
+
+	let error = check(&config)
+		.expect_err("the colliding ports should be refused")
+		.to_string();
+
+	assert!(error.contains("[::1]:9000"), "{error}");
+}
+
+#[test]
+fn metrics_token_and_intervals_reload() {
+	let default = default_config();
+	let tuned = config_from_toml(
+		"[global.metrics]\nbearer_token = \"a\"\ncollect_interval = 5\ncount_interval = 0\n",
+	)
+	.expect("the config should parse");
+
+	reload(&default, &tuned).expect("the metrics token and intervals should reload");
+
+	let moved = config_from_toml(
+		"[global.metrics]\nenable = true\naddress = \"0.0.0.0\"\nport = 9200\nbearer_token = \
+		 \"a\"\n",
+	)
+	.expect("the config should parse");
+
+	reload(&default, &moved)
+		.expect("a changed enable, address and port is ignored until restart, not refused");
+	reload(&moved, &default)
+		.expect("a reverted enable, address and port is ignored until restart, not refused");
 }

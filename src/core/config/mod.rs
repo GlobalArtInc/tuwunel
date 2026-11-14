@@ -43,6 +43,7 @@ pub mod client;
 pub mod compatibility;
 pub mod configuration;
 pub mod logging;
+pub mod metrics;
 pub mod presence;
 pub mod push;
 pub mod read_receipts;
@@ -96,6 +97,7 @@ pub use self::{
 	logging::Logging,
 	manager::Manager,
 	media::Media,
+	metrics::Metrics,
 	network::Network,
 	presence::Presence,
 	profile::Profile,
@@ -203,7 +205,8 @@ pub type ProviderSection<'a> = (&'a str, Cow<'a, StorageProvider>);
 	          identity_provider storage_provider registration_terms smtp cache database runtime \
 	          http network media federation rooms sending authentication directory encryption \
 	          profile registration admin appservice_client client compatibility configuration \
-	          logging presence push read_receipts rendezvous telemetry tracing turn typing",
+	          logging metrics presence push read_receipts rendezvous telemetry tracing turn \
+	          typing",
 	forbidden = "database_restore_backup force_migration"
 )]
 pub struct Config {
@@ -554,6 +557,12 @@ pub struct Config {
 	/// display: section
 	#[serde(default)]
 	pub logging: Logging,
+
+	/// Settings for metrics.
+	///
+	/// display: section
+	#[serde(default)]
+	pub metrics: Metrics,
 
 	/// Settings for presence.
 	///

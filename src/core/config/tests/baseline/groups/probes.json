@@ -324,6 +324,15 @@
     "runtime_path": "media.video_thumbnail.runtime_extra"
   },
   {
+    "section": "global.metrics",
+    "field": "metrics.enable",
+    "empty": "[global]\n[global.metrics]\n",
+    "partial": "[global]\n[global.metrics]\nenable = true\n",
+    "unknown_input": "[global.metrics]\nfuture_setting = [\"retained\"]\nruntime_extra = true\n",
+    "unknown_path": "metrics.future_setting",
+    "runtime_path": "metrics.runtime_extra"
+  },
+  {
     "section": "global.network",
     "field": "well_known_conn_timeout",
     "empty": "[global]\n[global.network]\n",
