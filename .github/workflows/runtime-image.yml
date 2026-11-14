@@ -16,6 +16,10 @@ permissions:
   contents: read
   packages: write
 
+concurrency:
+  group: runtime-image-${{ inputs.ref || github.ref }}
+  cancel-in-progress: false
+
 env:
   IMAGE: ghcr.io/globalartinc/tuwunel
 
