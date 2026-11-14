@@ -7,7 +7,7 @@ use ruma::{
 };
 
 use super::{
-	StateAfter,
+	Since, StateAfter,
 	joined::notifications::{
 		GateInputs, Gates as NotificationGates,
 		assemble_threads as assemble_thread_notifications,
@@ -40,6 +40,27 @@ fn state_after_selects_unstable_when_both_opted_in() {
 	assert!(matches!(StateAfter::from((true, false)), StateAfter::Stable));
 	assert!(matches!(StateAfter::from((false, true)), StateAfter::Unstable));
 	assert!(matches!(StateAfter::from((true, true)), StateAfter::Unstable));
+}
+
+#[test]
+fn since_without_token_is_initial() {
+	assert_eq!(Since::from(None), Since::Initial);
+}
+
+#[test]
+fn since_numeric_token_is_count() {
+	assert_eq!(Since::from(Some("123")), Since::Count(123));
+	assert_eq!(Since::from(Some("0")), Since::Count(0));
+	assert_eq!(Since::from(Some("18446744073709551615")), Since::Count(u64::MAX));
+}
+
+#[test]
+fn since_non_numeric_token_is_foreign() {
+	assert_eq!(Since::from(Some("s462025_2419382_0_94074")), Since::Foreign);
+	assert_eq!(Since::from(Some("garbage")), Since::Foreign);
+	assert_eq!(Since::from(Some("")), Since::Foreign);
+	assert_eq!(Since::from(Some("-5")), Since::Foreign);
+	assert_eq!(Since::from(Some("18446744073709551616")), Since::Foreign);
 }
 
 #[test]

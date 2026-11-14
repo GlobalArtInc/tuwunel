@@ -72,6 +72,23 @@ impl From<(bool, bool)> for StateAfter {
 	}
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Since {
+	Initial,
+	Count(u64),
+	Foreign,
+}
+
+impl From<Option<&str>> for Since {
+	fn from(since: Option<&str>) -> Self {
+		match since.map(str::parse) {
+			| None => Self::Initial,
+			| Some(Ok(count)) => Self::Count(count),
+			| Some(Err(_)) => Self::Foreign,
+		}
+	}
+}
+
 // Keep diagnostic macro expansions under the original tracing target.
 fn log_future_since(since: Option<u64>, next_batch: u64) {
 	debug_error!(?since, next_batch, "received since > next_batch, clamping");

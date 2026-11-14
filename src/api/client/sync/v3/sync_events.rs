@@ -43,7 +43,7 @@ use tuwunel_service::{Services, presence::Ping, users::InviteFilter};
 
 use super::{
 	super::{invite_permitted, profiles::collect as collect_profiles, share_encrypted_room},
-	StateAfter,
+	Since, StateAfter,
 	joined::load_room as load_joined_room,
 	left::collect_rooms as collect_left_rooms,
 	log_future_since,
@@ -164,11 +164,18 @@ pub(crate) async fn sync_events_route(
 
 	let filter = normalize_profile_fields(filter);
 
-	let mut since = body
-		.body
-		.since
-		.as_deref()
-		.map(|since| since.parse().unwrap_or(0));
+	let mut since = match Since::from(body.body.since.as_deref()) {
+		| Since::Initial => None,
+		| Since::Count(since) => Some(since),
+		| Since::Foreign => {
+			let next_batch = services.globals.wait_pending().await?;
+
+			trace!(target: "tuwunel_api_client::sync::v3", next_batch, "foreign since token");
+			return Ok(
+				build_empty_response(&services, sender_user, sender_device, next_batch).await
+			);
+		},
+	};
 
 	let stop_at = sync_deadline(&services, body.body.timeout);
 
