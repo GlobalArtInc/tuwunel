@@ -127,7 +127,9 @@ async fn last_normal_count_reads_the_newest_normal_row_then_serves_the_index() -
 		services.db["pduid_pdu"].insert(&id, b"{}");
 	}
 
+	assert_eq!(timeline.last_normal_len(), 0);
 	assert_eq!(timeline.last_normal_count(room).await?, Some(9));
+	assert_eq!(timeline.last_normal_len(), 1);
 
 	let newest: RawPduId = PduId { shortroomid, count: PduCount::Normal(9) }.into();
 	services.db["pduid_pdu"].remove(&newest);

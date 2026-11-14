@@ -8,7 +8,11 @@
 
 mod family;
 mod http;
+mod inventory;
 mod meta;
+mod pool;
+mod process;
+mod runtime;
 #[cfg(test)]
 mod tests;
 mod types;
@@ -17,8 +21,12 @@ mod write;
 pub use self::{
 	family::{DynFamily, EnumFamily, LabelSet, MAX_KEY_LEN, OTHER},
 	http::{Api, Http, InFlight, Method, ROUTE_CAP, StatusClass, UNMATCHED},
+	inventory::Inventory,
 	meta::Meta,
-	types::{Counter, Gauge, Histogram, Metric, Timer},
+	pool::Pool,
+	process::{Process, ProcessSample},
+	runtime::{Runtime, RuntimeSample},
+	types::{Counter, Gauge, Histogram, Metric, Seen, Timer},
 	write::{Kind, Le, Scale, Value, Writer, push_label},
 };
 
@@ -36,6 +44,18 @@ pub struct Registry {
 
 	/// Requests served over HTTP.
 	pub http: Http,
+
+	/// The server process.
+	pub process: Process,
+
+	/// The async runtime.
+	pub runtime: Runtime,
+
+	/// The database worker pool.
+	pub pool: Pool,
+
+	/// Cache sizes and record counts.
+	pub inventory: Inventory,
 }
 
 impl Registry {
@@ -49,6 +69,10 @@ impl Registry {
 		let mut w = Writer::new();
 		Meta::write(&mut w);
 		self.http.write(&mut w);
+		self.process.write(&mut w);
+		self.runtime.write(&mut w);
+		self.pool.write(&mut w);
+		self.inventory.write(&mut w);
 
 		w.finish()
 	}
@@ -59,5 +83,16 @@ impl Registry {
 	/// Closed families count every value of their label set, open families
 	/// count their ceiling plus `_other`, and a histogram counts its buckets,
 	/// `+Inf`, sum and count.
-	pub fn max_series(&self) -> usize { Meta::series().saturating_add(self.http.series()) }
+	pub fn max_series(&self) -> usize {
+		[
+			Meta::series(),
+			self.http.series(),
+			self.process.series(),
+			self.runtime.series(),
+			self.pool.series(),
+			self.inventory.series(),
+		]
+		.into_iter()
+		.fold(0, usize::saturating_add)
+	}
 }

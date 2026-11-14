@@ -597,6 +597,19 @@ pub async fn last_normal_count(&self, room_id: &RoomId) -> Result<Option<u64>> {
 	}
 }
 
+/// Returns the number of rooms with an entry in the cache of newest normal
+/// counts.
+///
+/// The cache only grows while the server runs. This takes the read lock for the
+/// length of one call and does not touch the database.
+#[implement(Service)]
+pub fn last_normal_len(&self) -> usize {
+	self.last_normal
+		.read()
+		.unwrap_or_else(PoisonError::into_inner)
+		.len()
+}
+
 #[implement(Service)]
 fn cached_normal_count(&self, room_id: &RoomId) -> Option<u64> {
 	self.last_normal

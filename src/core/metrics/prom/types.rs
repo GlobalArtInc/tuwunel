@@ -1,7 +1,7 @@
 //! Counter, gauge and histogram built on relaxed atomics.
 
 use std::{
-	sync::atomic::{AtomicI64, AtomicU64, Ordering::Relaxed},
+	sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering::Relaxed},
 	time::{Duration, Instant},
 };
 
@@ -31,6 +31,16 @@ pub struct Counter {
 #[derive(Debug, Default)]
 pub struct Gauge {
 	value: AtomicI64,
+}
+
+/// Wraps a metric that is exposed only after it was first written.
+///
+/// Used for readings that a collector fills in and that may be unavailable on
+/// a platform or before the first scan, where a zero would be misleading.
+#[derive(Debug, Default)]
+pub struct Seen<M> {
+	seen: AtomicBool,
+	inner: M,
 }
 
 /// Distribution over fixed buckets.
@@ -76,9 +86,46 @@ impl Counter {
 	pub fn add(&self, count: u64) { self.value.fetch_add(count, Relaxed); }
 
 	#[inline]
+	/// Raises the counter to `total`, for a source that reports a running
+	/// total rather than increments. A smaller `total` is ignored, so the
+	/// counter never moves backwards.
+	pub fn raise_to(&self, total: u64) { self.value.fetch_max(total, Relaxed); }
+
+	#[inline]
 	#[must_use]
 	/// Returns the stored integer.
 	pub fn get(&self) -> u64 { self.value.load(Relaxed) }
+}
+
+impl<M> Seen<M> {
+	#[must_use]
+	/// Wraps `inner`, which stays unexposed until [`Self::touch`].
+	pub const fn new(inner: M) -> Self { Self { seen: AtomicBool::new(false), inner } }
+
+	#[inline]
+	/// Marks the metric as written and returns it.
+	pub fn touch(&self) -> &M {
+		self.seen.store(true, Relaxed);
+
+		&self.inner
+	}
+
+	#[inline]
+	#[must_use]
+	/// Returns whether the metric was ever written.
+	pub fn is_seen(&self) -> bool { self.seen.load(Relaxed) }
+}
+
+impl<M: Metric> Metric for Seen<M> {
+	const KIND: Kind = M::KIND;
+
+	fn write(&self, w: &mut Writer, name: &str, labels: &str) {
+		if self.is_seen() {
+			self.inner.write(w, name, labels);
+		}
+	}
+
+	fn series(&self) -> usize { self.inner.series() }
 }
 
 impl Default for Counter {

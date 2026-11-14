@@ -39,6 +39,19 @@ pub(crate) struct Pool {
 	queued_max: AtomicUsize,
 }
 
+/// Occupancy of the worker pool at one moment.
+///
+/// The two readings are taken one after the other, so they need not describe
+/// the same instant.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PoolStats {
+	/// Number of worker threads that are running.
+	pub workers: usize,
+
+	/// Number of requests waiting in the queues for a worker.
+	pub queued: usize,
+}
+
 /// Represents work accepted by the database thread pool.
 ///
 /// Point queries use [`Get`], while iterator initialization uses [`Seek`]. Each
@@ -143,6 +156,18 @@ impl Drop for Pool {
 			"channel should be closed on drop"
 		);
 	}
+}
+
+/// Reports how many workers the pool runs and how many requests wait for one.
+///
+/// Reads two counters and takes the worker list lock only to count it, so it
+/// is cheap enough to call on a timer.
+#[implement(Pool)]
+pub(crate) fn stats(&self) -> PoolStats {
+	let workers = self.workers.lock().expect("locked").len();
+	let queued = self.queues.iter().map(Sender::len).sum();
+
+	PoolStats { workers, queued }
 }
 
 #[implement(Pool)]

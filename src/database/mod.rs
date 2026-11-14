@@ -41,6 +41,7 @@ pub use self::{
 	handle::Handle,
 	keyval::{KeyBuf, KeyVal, Slice, deserialize_key, serialize_key, serialize_val},
 	map::{Get, Map, MapId, Qry, compact},
+	pool::PoolStats,
 	ser::{Cbor, Interfix, Json, SEP, Separator, serialize, serialize_to, serialize_to_vec},
 	txn::{Txn, TxnError},
 };
@@ -91,6 +92,11 @@ impl Database {
 	/// only for maps owned by that engine. Queued operations remain unapplied
 	/// until the transaction is executed.
 	pub fn txn(&self) -> Txn { Txn::new(&self.engine) }
+
+	#[inline]
+	#[must_use]
+	/// Reports the occupancy of the worker pool that serves blocking reads.
+	pub fn pool_stats(&self) -> PoolStats { self.engine.pool.stats() }
 
 	#[inline]
 	/// Retrieves a configured map by name.
