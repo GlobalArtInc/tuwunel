@@ -6,7 +6,10 @@ mod tests;
 use std::{
 	collections::{BTreeMap, btree_map::Entry},
 	mem::replace,
-	sync::Arc,
+	sync::{
+		Arc,
+		atomic::{AtomicU64, Ordering},
+	},
 };
 
 use futures::Stream;
@@ -33,6 +36,7 @@ pub struct Service {
 	services: Arc<crate::services::OnceServices>,
 	connections: Connections,
 	db: Data,
+	fastpath_mismatches: AtomicU64,
 }
 
 struct Data {
@@ -201,11 +205,22 @@ impl crate::Service for Service {
 			},
 			services: args.services.clone(),
 			connections: Default::default(),
+			fastpath_mismatches: AtomicU64::new(0),
 		}))
 	}
 
 	fn name(&self) -> &str { crate::service::make_name(std::module_path!()) }
 }
+
+#[implement(Service)]
+pub fn note_fastpath_mismatch(&self) {
+	self.fastpath_mismatches
+		.fetch_add(1, Ordering::Relaxed);
+}
+
+#[implement(Service)]
+#[must_use]
+pub fn fastpath_mismatches(&self) -> u64 { self.fastpath_mismatches.load(Ordering::Relaxed) }
 
 /// Drops the loaded connections that match every filter given, returning how
 /// many were dropped.
