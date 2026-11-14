@@ -539,6 +539,24 @@ fn sync_fastpath_switches_default_off_and_reload() {
 }
 
 #[test]
+fn sync_initial_large_account_defaults_and_reload() {
+	let default = default_config();
+	let tuned = config_from_toml(
+		"[global.client.sync]\ninitial_large_account_rooms = \
+		 0\ninitial_large_account_timeline_limit = 5\n",
+	)
+	.unwrap();
+
+	let (default_sync, tuned_sync) = (&default.client.sync, &tuned.client.sync);
+
+	assert_eq!(default_sync.initial_large_account_rooms, 1000);
+	assert_eq!(default_sync.initial_large_account_timeline_limit, 1);
+	assert_eq!(tuned_sync.initial_large_account_rooms, 0);
+	assert_eq!(tuned_sync.initial_large_account_timeline_limit, 5);
+	reload(&default, &tuned).expect("initial large account settings should reload");
+}
+
+#[test]
 fn prev_events_concurrency_is_nonzero_and_reloadable() {
 	let default = default_config();
 	let zero = config_from_toml("[global]\nprev_events_concurrency = 0\n").unwrap();

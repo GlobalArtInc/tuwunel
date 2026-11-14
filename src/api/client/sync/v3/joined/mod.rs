@@ -47,7 +47,7 @@ use self::notifications::{
 };
 use super::{
 	super::{load_timeline, strip_state_unsigned, timeline_prev_batch},
-	StateAfter, StateChangeParams, StateChanges,
+	DEFAULT_TIMELINE_LIMIT, StateAfter, StateChangeParams, StateChanges,
 	state::{
 		UserMetadata, calculate_state_changes, gather_room_metadata, gather_user_metadata,
 		typings_event_for_user,
@@ -451,7 +451,7 @@ async fn load_join_timeline(
 		.limit
 		.map(TryInto::try_into)
 		.map_expect("UInt to usize")
-		.unwrap_or(10)
+		.unwrap_or(DEFAULT_TIMELINE_LIMIT)
 		.min(100);
 
 	load_timeline(

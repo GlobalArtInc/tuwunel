@@ -7,7 +7,7 @@ use ruma::{
 };
 
 use super::{
-	Since, StateAfter,
+	Since, StateAfter, capped_timeline_limit,
 	joined::notifications::{
 		GateInputs, Gates as NotificationGates,
 		assemble_threads as assemble_thread_notifications,
@@ -335,3 +335,33 @@ fn notification_gates(
 }
 
 fn no_threads() -> BTreeMap<OwnedEventId, u64> { BTreeMap::new() }
+
+#[test]
+fn initial_cap_is_off_when_the_threshold_is_zero() {
+	assert_eq!(capped_timeline_limit(5000, 0, 1, Some(uint!(20))), None);
+}
+
+#[test]
+fn initial_cap_applies_only_above_the_threshold() {
+	assert_eq!(capped_timeline_limit(1000, 1000, 1, Some(uint!(20))), None);
+	assert_eq!(capped_timeline_limit(1001, 1000, 1, Some(uint!(20))), Some(uint!(1)));
+}
+
+#[test]
+fn initial_cap_keeps_a_smaller_client_limit() {
+	assert_eq!(capped_timeline_limit(1001, 1000, 5, Some(uint!(3))), None);
+	assert_eq!(capped_timeline_limit(1001, 1000, 5, Some(uint!(5))), None);
+	assert_eq!(capped_timeline_limit(1001, 1000, 5, Some(uint!(0))), None);
+	assert_eq!(capped_timeline_limit(1001, 1000, 5, Some(uint!(6))), Some(uint!(5)));
+}
+
+#[test]
+fn initial_cap_without_a_client_limit_never_raises_the_default() {
+	assert_eq!(capped_timeline_limit(1001, 1000, 1, None), Some(uint!(1)));
+	assert_eq!(capped_timeline_limit(1001, 1000, 50, None), None);
+}
+
+#[test]
+fn initial_cap_of_zero_acts_as_one() {
+	assert_eq!(capped_timeline_limit(1001, 1000, 0, Some(uint!(20))), Some(uint!(1)));
+}

@@ -38,7 +38,7 @@ use super::{
 	super::{
 		load_timeline, own_departure, stand_in_leave, strip_state_unsigned, timeline_prev_batch,
 	},
-	StateAfter, StateChangeParams, StateChanges, missing_room_state,
+	DEFAULT_TIMELINE_LIMIT, StateAfter, StateChangeParams, StateChanges, missing_room_state,
 	state::calculate_state_changes,
 };
 use crate::{ignored_filter, is_empty_account_data_event, with_membership};
@@ -246,7 +246,7 @@ async fn load_left_room(
 		.limit
 		.map(TryInto::try_into)
 		.map_expect("UInt to usize")
-		.unwrap_or(10)
+		.unwrap_or(DEFAULT_TIMELINE_LIMIT)
 		.min(100);
 
 	let (timeline_pdus, limited, _) = load_timeline(

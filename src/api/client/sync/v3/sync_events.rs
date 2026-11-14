@@ -43,7 +43,7 @@ use tuwunel_service::{Services, presence::Ping, users::InviteFilter};
 
 use super::{
 	super::{invite_permitted, profiles::collect as collect_profiles, share_encrypted_room},
-	Since, StateAfter,
+	Since, StateAfter, capped_timeline_limit,
 	joined::fastpath::{Tally, load_room_or_skip},
 	left::collect_rooms as collect_left_rooms,
 	log_future_since,
@@ -189,6 +189,11 @@ pub(crate) async fn sync_events_route(
 		},
 	};
 
+	let capped_filter = match since {
+		| None => initial_capped_filter(&services, sender_user, &filter).await,
+		| Some(_) => None,
+	};
+
 	let stop_at = sync_deadline(&services, body.body.timeout);
 
 	loop {
@@ -217,7 +222,10 @@ pub(crate) async fn sync_events_route(
 				next_batch,
 				full_state,
 				state_after,
-				filter: &filter,
+				filter: capped_filter
+					.as_ref()
+					.filter(|_| since.is_none())
+					.unwrap_or(&filter),
 			})
 			.await?;
 
@@ -252,6 +260,45 @@ pub(crate) async fn sync_events_route(
 
 		since = Some(next_batch);
 	}
+}
+
+async fn initial_capped_filter(
+	services: &Services,
+	sender_user: &UserId,
+	filter: &FilterDefinition,
+) -> Option<FilterDefinition> {
+	let sync = &services.config.client.sync;
+	let threshold = sync.initial_large_account_rooms;
+	if threshold == 0 {
+		return None;
+	}
+
+	let rooms = services
+		.state_cache
+		.rooms_joined(sender_user)
+		.take(threshold.saturating_add(1))
+		.count()
+		.await;
+
+	let limit = capped_timeline_limit(
+		rooms,
+		threshold,
+		sync.initial_large_account_timeline_limit,
+		filter.room.timeline.limit,
+	)?;
+
+	debug!(
+		target: "tuwunel_api_client::sync::v3",
+		user_id = %sender_user,
+		rooms,
+		%limit,
+		"capping the timeline of an initial sync"
+	);
+
+	let mut filter = filter.clone();
+	filter.room.timeline.limit = Some(limit);
+
+	Some(filter)
 }
 
 async fn build_foreign_response(

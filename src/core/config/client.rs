@@ -111,6 +111,33 @@ pub struct Sync {
 	/// reloadable: yes
 	#[serde(default)]
 	pub fastpath_verify: bool,
+
+	/// Joined-room count above which an initial legacy sync, one without
+	/// `since`, caps the timeline of every room.
+	///
+	/// An account with thousands of rooms cannot be answered in reasonable
+	/// time with the full timeline the client asks for. Past this count the
+	/// timeline limit is lowered to `initial_large_account_timeline_limit`; a
+	/// room with more events is marked `limited` and carries a `prev_batch`
+	/// token, so the client loads the earlier history when it opens the room.
+	/// Incremental syncs are not affected. 0 disables the cap.
+	///
+	/// reloadable: yes
+	/// default: 1000
+	#[serde(default = "default_initial_large_account_rooms")]
+	pub initial_large_account_rooms: usize,
+
+	/// Highest timeline limit of a room in an initial legacy sync of an
+	/// account above `initial_large_account_rooms`.
+	///
+	/// A smaller limit requested by the client is kept. A value of 0 is
+	/// treated as 1, because a room with no events would have no `prev_batch`
+	/// to load its history from.
+	///
+	/// reloadable: yes
+	/// default: 1
+	#[serde(default = "default_initial_large_account_timeline_limit")]
+	pub initial_large_account_timeline_limit: usize,
 }
 
 impl Default for Sync {
@@ -122,6 +149,8 @@ impl Default for Sync {
 			calculate_heroes: true_fn(),
 			fastpath: false,
 			fastpath_verify: false,
+			initial_large_account_rooms: default_initial_large_account_rooms(),
+			initial_large_account_timeline_limit: default_initial_large_account_timeline_limit(),
 		}
 	}
 }
@@ -131,3 +160,7 @@ fn default_timeout_min() -> u64 { 5000 }
 fn default_timeout_default() -> u64 { 30000 }
 
 fn default_timeout_max() -> u64 { 90000 }
+
+fn default_initial_large_account_rooms() -> usize { 1000 }
+
+fn default_initial_large_account_timeline_limit() -> usize { 1 }

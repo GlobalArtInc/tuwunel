@@ -1,5 +1,5 @@
 use ruma::{
-	OwnedUserId, RoomId,
+	OwnedUserId, RoomId, UInt,
 	api::client::sync::sync_events::v3::{State as RoomState, StateEvents},
 };
 use tuwunel_core::{Error, debug_error, err};
@@ -8,6 +8,8 @@ use tuwunel_service::rooms::{lazy_loading::Witness, short::ShortStateHash};
 
 pub use self::state::calculate_heroes;
 pub(crate) use self::sync_events::sync_events_route;
+
+const DEFAULT_TIMELINE_LIMIT: usize = 10;
 
 mod joined;
 mod left;
@@ -90,6 +92,24 @@ impl From<Option<&str>> for Since {
 			| Some(Err(_)) => Self::Foreign,
 		}
 	}
+}
+
+fn capped_timeline_limit(
+	rooms: usize,
+	threshold: usize,
+	cap: usize,
+	requested: Option<UInt>,
+) -> Option<UInt> {
+	if threshold == 0 || rooms <= threshold {
+		return None;
+	}
+
+	let cap = UInt::try_from(cap.max(1)).unwrap_or(UInt::MAX);
+	let requested = requested.unwrap_or_else(|| {
+		UInt::try_from(DEFAULT_TIMELINE_LIMIT).expect("default timeline limit fits UInt")
+	});
+
+	(requested > cap).then_some(cap)
 }
 
 // Keep diagnostic macro expansions under the original tracing target.
