@@ -38,6 +38,7 @@ pub(crate) async fn open(ctx: Arc<Context>, desc: &[Descriptor]) -> Result<Arc<S
 		config,
 		&ctx.env.lock().expect("environment locked"),
 		&ctx.row_cache.lock().expect("row cache locked"),
+		&server.metrics,
 	)?;
 
 	let (cfds, dropped) = Self::configure_cfds(&ctx, &db_opts, desc)?;

@@ -3,8 +3,8 @@ use std::{collections::BTreeSet, sync::Arc, thread};
 use regex::Regex;
 
 use super::{
-	Counter, DynFamily, EnumFamily, Gauge, Histogram, MAX_KEY_LEN, Metric, OTHER, Registry,
-	Scale, Writer,
+	CacheSample, Condition, Counter, DynFamily, EnumFamily, Gauge, Histogram, MAX_KEY_LEN,
+	Metric, OTHER, Registry, RocksSample, Scale, Writer,
 };
 use crate::label_set;
 
@@ -439,5 +439,46 @@ fn probe_labels_stay_within_the_allowlist() {
 			.all(|name| ALLOWED_LABELS.contains(&name.as_str())),
 		"label names outside the allowlist: {:?}",
 		parsed.label_names
+	);
+}
+
+#[test]
+fn rocksdb_readings_are_exposed_once_taken_and_events_always() {
+	let registry = Registry::new();
+	let text = registry.render();
+
+	assert!(!text.contains("tuwunel_rocksdb_sst_bytes"));
+	assert!(text.contains("tuwunel_rocksdb_flushes_total 0\n"));
+
+	registry.rocksdb.flush_completed();
+	registry.rocksdb.compaction_completed();
+	registry.rocksdb.stall_changed(Condition::Stopped);
+	registry.rocksdb.record(&RocksSample {
+		sst_bytes: Some(4096),
+		block_caches: vec![CacheSample {
+			pool: "Shared",
+			usage: 7,
+			pinned: 3,
+			capacity: 100,
+		}],
+		..RocksSample::default()
+	});
+
+	let text = registry.render();
+	let parsed = parse(&text);
+
+	assert!(text.contains("tuwunel_rocksdb_sst_bytes 4096\n"), "{text}");
+	assert!(text.contains("tuwunel_rocksdb_flushes_total 1\n"), "{text}");
+	assert!(text.contains("tuwunel_rocksdb_compactions_total 1\n"), "{text}");
+	assert!(text.contains("tuwunel_rocksdb_stall_changes_total{condition=\"stopped\"} 1\n"));
+	assert!(text.contains("tuwunel_rocksdb_block_cache_usage_bytes{pool=\"Shared\"} 7\n"));
+	assert!(!text.contains("tuwunel_rocksdb_wal_bytes "), "{text}");
+	assert!(parsed.samples <= registry.max_series());
+
+	registry.rocksdb.record(&RocksSample::default());
+	assert!(
+		registry
+			.render()
+			.contains("tuwunel_rocksdb_sst_bytes 4096\n")
 	);
 }

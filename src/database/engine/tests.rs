@@ -1,5 +1,6 @@
 use std::{
 	env::temp_dir,
+	ffi::OsStr,
 	fs::{self, create_dir_all, remove_dir_all},
 	path::Path,
 	process::id,
@@ -18,6 +19,7 @@ use super::{
 	context::{ColCache, ColCaches, SHARED_POOL},
 	descriptor::{self, CacheDisp, Descriptor},
 	env::Env,
+	metrics::is_wal_name,
 	open::{drop_columns, is_remnant},
 };
 use crate::{maps::descriptor, or_else};
@@ -312,4 +314,16 @@ fn preview_columns_cover_configured_lifetime() {
 		assert!(preview.ttl >= ttl, "url_preview ttl below the configured lifetime");
 		assert!(lazy_media.ttl >= preview.ttl, "mediaid_lazy ttl below url_preview ttl");
 	}
+}
+
+#[test]
+fn write_ahead_logs_are_numbered_log_files() {
+	assert!(is_wal_name(OsStr::new("000004.log")));
+	assert!(is_wal_name(OsStr::new("1.log")));
+
+	assert!(!is_wal_name(OsStr::new("LOG")));
+	assert!(!is_wal_name(OsStr::new("LOG.old.1700000000")));
+	assert!(!is_wal_name(OsStr::new("backup.log")));
+	assert!(!is_wal_name(OsStr::new(".log")));
+	assert!(!is_wal_name(OsStr::new("000123.sst")));
 }

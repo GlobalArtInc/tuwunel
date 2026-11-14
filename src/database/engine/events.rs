@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use rocksdb::{
 	Env,
 	event_listener::{
@@ -6,21 +8,51 @@ use rocksdb::{
 		WriteStallInfo,
 	},
 };
-use tuwunel_core::{Config, debug, debug::INFO_SPAN_LEVEL, debug_info, error, info, warn};
+use tuwunel_core::{
+	Config, debug,
+	debug::INFO_SPAN_LEVEL,
+	debug_info, error, info,
+	metrics::{
+		Metrics,
+		prom::{Condition, Registry},
+	},
+	warn,
+};
 
 /// Bridges RocksDB background events into structured tracing.
 ///
 /// The listener records stalls, compactions, flushes, memtable seals, and
-/// external file ingestion without retaining per-event state.
-pub(super) struct Events;
+/// external file ingestion without retaining per-event state. Compactions,
+/// flushes, stall changes and background errors are also counted in the
+/// Prometheus registry while it is enabled.
+pub(super) struct Events {
+	metrics: Arc<Metrics>,
+}
 
 impl Events {
-	pub(super) fn new(_config: &Config, _env: &Env) -> Self { Self {} }
+	pub(super) fn new(_config: &Config, _env: &Env, metrics: Arc<Metrics>) -> Self {
+		Self { metrics }
+	}
+
+	#[inline]
+	fn registry(&self) -> Option<&Registry> { self.metrics.prometheus() }
+}
+
+fn condition(condition: DBWriteStallCondition) -> Condition {
+	match condition {
+		| DBWriteStallCondition::KNormal => Condition::Normal,
+		| DBWriteStallCondition::KDelayed => Condition::Delayed,
+		| DBWriteStallCondition::KStopped => Condition::Stopped,
+	}
 }
 
 impl EventListener for Events {
 	#[tracing::instrument(name = "error", level = "error", skip_all)]
 	fn on_background_error(&self, reason: DBBackgroundErrorReason, status: MutableStatus) {
+		if let Some(registry) = self.registry() {
+			registry.rocksdb.background_error();
+		}
+
 		error!(
 			?reason,
 			severity = ?status.severity(),
@@ -31,6 +63,12 @@ impl EventListener for Events {
 
 	#[tracing::instrument(name = "stall", level = "warn", skip_all)]
 	fn on_stall_conditions_changed(&self, info: &WriteStallInfo) {
+		if let Some(registry) = self.registry() {
+			registry
+				.rocksdb
+				.stall_changed(condition(info.cur()));
+		}
+
 		let col = info.cf_name();
 		let col = col
 			.as_deref()
@@ -103,6 +141,12 @@ impl EventListener for Events {
 		skip_all,
 	)]
 	fn on_compaction_completed(&self, info: &CompactionJobInfo) {
+		if let Some(registry) = self.registry()
+			&& info.status().is_ok()
+		{
+			registry.rocksdb.compaction_completed();
+		}
+
 		let col = info.cf_name();
 		let col = col
 			.as_deref()
@@ -205,6 +249,10 @@ impl EventListener for Events {
 		skip_all,
 	)]
 	fn on_flush_completed(&self, info: &FlushJobInfo) {
+		if let Some(registry) = self.registry() {
+			registry.rocksdb.flush_completed();
+		}
+
 		let col = info.cf_name();
 		let col = col
 			.as_deref()

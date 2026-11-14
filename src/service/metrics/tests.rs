@@ -45,6 +45,15 @@ async fn one_collection_fills_the_gauges_and_one_count_the_totals() -> Result {
 		"tuwunel_db_pool_workers",
 		"tuwunel_db_pool_queued",
 		"tuwunel_timeline_last_normal_entries",
+		"tuwunel_rocksdb_row_cache_capacity_bytes",
+		"tuwunel_rocksdb_memtable_bytes",
+		"tuwunel_rocksdb_pending_compaction_bytes",
+		"tuwunel_rocksdb_running_compactions",
+		"tuwunel_rocksdb_running_flushes",
+		"tuwunel_rocksdb_sst_bytes",
+		"tuwunel_rocksdb_sst_files",
+		"tuwunel_rocksdb_wal_bytes",
+		"tuwunel_rocksdb_flushes_total",
 	] {
 		assert!(sample_of(&text, family).is_some(), "{family}\n{text}");
 	}

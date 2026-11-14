@@ -17,6 +17,7 @@ mod events;
 mod files;
 mod logger;
 mod memory_usage;
+mod metrics;
 mod open;
 mod repair;
 #[cfg(test)]
@@ -38,6 +39,7 @@ use rocksdb::{
 };
 use tuwunel_core::{Err, Result, debug, err, implement, info, warn};
 
+pub use self::metrics::MetricsSnapshot;
 use crate::{
 	Context, Map,
 	pool::Pool,

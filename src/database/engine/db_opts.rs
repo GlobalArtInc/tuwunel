@@ -1,7 +1,7 @@
-use std::cmp;
+use std::{cmp, sync::Arc};
 
 use rocksdb::{Cache, DBRecoveryMode, Env, LogLevel, Options, statistics::StatsLevel};
-use tuwunel_core::{Config, Result, utils};
+use tuwunel_core::{Config, Result, metrics::Metrics, utils};
 
 use super::{cf_opts::cache_size_f64, events::Events, logger::handle as handle_log};
 use crate::util::map_err;
@@ -11,7 +11,12 @@ use crate::util::map_err;
 /// resulting value. Note that we require special per-column options on some
 /// columns, therefor columns should only be opened after passing this result
 /// through cf_options().
-pub(crate) fn db_options(config: &Config, env: &Env, row_cache: &Cache) -> Result<Options> {
+pub(crate) fn db_options(
+	config: &Config,
+	env: &Env,
+	row_cache: &Cache,
+	metrics: &Arc<Metrics>,
+) -> Result<Options> {
 	const DEFAULT_STATS_LEVEL: StatsLevel = if cfg!(debug_assertions) {
 		StatsLevel::ExceptDetailedTimers
 	} else {
@@ -22,7 +27,7 @@ pub(crate) fn db_options(config: &Config, env: &Env, row_cache: &Cache) -> Resul
 
 	// Logging
 	set_logging_defaults(&mut opts, config);
-	opts.add_event_listener(Events::new(config, env));
+	opts.add_event_listener(Events::new(config, env, metrics.clone()));
 
 	// Processing
 	opts.set_max_background_jobs(num_threads::<i32>(config)?);

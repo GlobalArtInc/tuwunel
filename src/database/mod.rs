@@ -37,7 +37,7 @@ pub use self::{
 	cork::Cork,
 	de::{Ignore, IgnoreAll, from_slice as deserialize_from_slice},
 	deserialized::Deserialized,
-	engine::Engine,
+	engine::{Engine, MetricsSnapshot},
 	handle::Handle,
 	keyval::{KeyBuf, KeyVal, Slice, deserialize_key, serialize_key, serialize_val},
 	map::{Get, Map, MapId, Qry, compact},
@@ -97,6 +97,11 @@ impl Database {
 	#[must_use]
 	/// Reports the occupancy of the worker pool that serves blocking reads.
 	pub fn pool_stats(&self) -> PoolStats { self.engine.pool.stats() }
+
+	#[must_use]
+	/// Reads the size and occupancy gauges of the engine for the metrics
+	/// collector. Blocking; see [`Engine::metrics_snapshot`].
+	pub fn metrics_snapshot(&self) -> MetricsSnapshot { self.engine.metrics_snapshot() }
 
 	#[inline]
 	/// Retrieves a configured map by name.

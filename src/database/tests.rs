@@ -11,12 +11,13 @@ use std::{
 	path::{Path, PathBuf},
 	process::id as process_id,
 	sync::Arc,
+	time::{Duration, Instant},
 };
 
 use futures::{StreamExt, TryStreamExt};
 use rocksdb::WriteBatch;
 use serde::{Deserialize, Serialize};
-use tokio::runtime::Handle;
+use tokio::{runtime::Handle, time::sleep};
 use tracing::subscriber::NoSubscriber;
 use tuwunel_core::{
 	Result, Server,
@@ -1481,6 +1482,56 @@ fn new_server(raw_config: &Figment) -> Result<Arc<Server>> {
 	let server = Server::new(config, Sources::default(), Some(&runtime), logging, metrics);
 
 	Ok(Arc::new(server))
+}
+
+#[tokio::test]
+async fn a_flush_is_counted_and_its_files_are_sized() -> Result {
+	let path = database_path("metrics-flush");
+	let server = new_server(&base_config(&path))?;
+	let registry = server.metrics.enable_prometheus();
+	let db = Database::open(&server).await?;
+
+	db.get("alias_roomid")?.raw_put(b"key", 1_u64);
+
+	let before = db.metrics_snapshot();
+	assert!(before.failed.is_empty(), "{:?}", before.failed);
+	assert!(before.sample.memtable_bytes > Some(0));
+	assert_eq!(before.sample.sst_bytes, Some(0));
+	assert_eq!(registry.rocksdb.flushes(), 0);
+
+	db.engine.sort()?;
+
+	let deadline = Instant::now() + Duration::from_secs(10);
+	while registry.rocksdb.flushes() == 0 && Instant::now() < deadline {
+		sleep(Duration::from_millis(10)).await;
+	}
+
+	assert!(registry.rocksdb.flushes() >= 1);
+
+	let after = db.metrics_snapshot();
+	assert!(after.failed.is_empty(), "{:?}", after.failed);
+	assert!(after.sample.sst_bytes > Some(0));
+	assert!(after.sample.sst_files >= Some(1));
+	assert!(after.sample.wal_bytes.is_some());
+	assert_eq!(after.sample.write_stopped, Some(0));
+	assert!(
+		after
+			.sample
+			.block_caches
+			.iter()
+			.any(|cache| cache.pool == "Shared" && cache.capacity > 0)
+	);
+
+	registry.rocksdb.record(&after.sample);
+
+	let text = registry.render();
+	assert!(text.contains("tuwunel_rocksdb_flushes_total "), "{text}");
+	assert!(
+		text.contains("tuwunel_rocksdb_block_cache_usage_bytes{pool=\"Shared\"} "),
+		"{text}"
+	);
+
+	Ok(())
 }
 
 #[tokio::test]

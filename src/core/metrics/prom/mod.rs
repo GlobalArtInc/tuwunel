@@ -12,6 +12,7 @@ mod inventory;
 mod meta;
 mod pool;
 mod process;
+mod rocksdb;
 mod runtime;
 #[cfg(test)]
 mod tests;
@@ -25,6 +26,7 @@ pub use self::{
 	meta::Meta,
 	pool::Pool,
 	process::{Process, ProcessSample},
+	rocksdb::{CacheSample, Condition, POOL_CAP, RocksSample, Rocksdb},
 	runtime::{Runtime, RuntimeSample},
 	types::{Counter, Gauge, Histogram, Metric, Seen, Timer},
 	write::{Kind, Le, Scale, Value, Writer, push_label},
@@ -56,6 +58,9 @@ pub struct Registry {
 
 	/// Cache sizes and record counts.
 	pub inventory: Inventory,
+
+	/// The RocksDB engine.
+	pub rocksdb: Rocksdb,
 }
 
 impl Registry {
@@ -73,6 +78,7 @@ impl Registry {
 		self.runtime.write(&mut w);
 		self.pool.write(&mut w);
 		self.inventory.write(&mut w);
+		self.rocksdb.write(&mut w);
 
 		w.finish()
 	}
@@ -91,6 +97,7 @@ impl Registry {
 			self.runtime.series(),
 			self.pool.series(),
 			self.inventory.series(),
+			self.rocksdb.series(),
 		]
 		.into_iter()
 		.fold(0, usize::saturating_add)

@@ -1,4 +1,7 @@
-use std::{sync::atomic::Ordering, time::UNIX_EPOCH};
+use std::{
+	sync::{Arc, atomic::Ordering},
+	time::UNIX_EPOCH,
+};
 
 use tokio::{runtime::RuntimeMetrics, task::spawn_blocking};
 use tuwunel_core::{
@@ -9,8 +12,8 @@ use tuwunel_core::{
 
 use super::{Service, process};
 
-/// Refreshes the cheap gauges of the process, the runtime, the database pool
-/// and the timeline cache once.
+/// Refreshes the cheap gauges of the process, the runtime, the database pool,
+/// the timeline cache and the RocksDB engine once.
 ///
 /// Does nothing while the registry is off. A reading that cannot be taken is
 /// logged and its gauge keeps the previous value.
@@ -21,6 +24,7 @@ pub async fn collect_once(&self) {
 	};
 
 	self.collect_process(registry).await;
+	self.collect_rocksdb(registry).await;
 
 	if let Some(runtime) = self.server.metrics.runtime_metrics() {
 		registry.runtime.record(&runtime_sample(runtime));
@@ -62,6 +66,27 @@ async fn collect_process(&self, registry: &Registry) {
 		.map(|since| since.as_secs());
 
 	registry.process.record(&sample);
+}
+
+#[implement(Service)]
+async fn collect_rocksdb(&self, registry: &Registry) {
+	let db = Arc::clone(&self.db);
+	let snapshot = match spawn_blocking(move || db.metrics_snapshot()).await {
+		| Ok(snapshot) => snapshot,
+		| Err(e) => {
+			error!("The RocksDB sampling task failed: {e}");
+			return;
+		},
+	};
+
+	if !snapshot.failed.is_empty() && !self.rocksdb_failed.swap(true, Ordering::Relaxed) {
+		warn!(
+			readings = ?snapshot.failed,
+			"Some RocksDB readings are unavailable; their gauges keep the last value or stay absent"
+		);
+	}
+
+	registry.rocksdb.record(&snapshot.sample);
 }
 
 fn runtime_sample(runtime: &RuntimeMetrics) -> RuntimeSample {
