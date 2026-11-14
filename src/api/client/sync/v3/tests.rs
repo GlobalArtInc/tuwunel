@@ -15,6 +15,7 @@ use super::{
 		compute_gates as compute_notification_gates, in_window, quiet_counts_reported,
 		send_thread_counts,
 	},
+	stale_since,
 };
 
 const SINCE: u64 = 100;
@@ -364,4 +365,22 @@ fn initial_cap_without_a_client_limit_never_raises_the_default() {
 #[test]
 fn initial_cap_of_zero_acts_as_one() {
 	assert_eq!(capped_timeline_limit(1001, 1000, 0, Some(uint!(20))), Some(uint!(1)));
+}
+
+#[test]
+fn since_is_stale_only_past_the_gap() {
+	assert!(!stale_since(1000, 900, 100));
+	assert!(stale_since(1000, 899, 100));
+	assert!(!stale_since(1000, 1000, 100));
+}
+
+#[test]
+fn since_is_never_stale_with_a_zero_gap() {
+	assert!(!stale_since(1_000_000, 0, 0));
+}
+
+#[test]
+fn since_from_the_future_is_not_stale() {
+	assert!(!stale_since(1000, 5000, 100));
+	assert!(!stale_since(0, u64::MAX, 1));
 }

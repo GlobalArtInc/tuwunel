@@ -46,7 +46,7 @@ use super::{
 	Since, StateAfter, capped_timeline_limit,
 	joined::fastpath::{Tally, load_room_or_skip},
 	left::collect_rooms as collect_left_rooms,
-	log_future_since,
+	log_future_since, stale_since,
 };
 use crate::{
 	ClientIp, Ruma, is_empty_account_data_event,
@@ -189,10 +189,19 @@ pub(crate) async fn sync_events_route(
 		},
 	};
 
-	let capped_filter = match since {
-		| None => initial_capped_filter(&services, sender_user, &filter).await,
-		| Some(_) => None,
-	};
+	let stale_gap = services
+		.config
+		.client
+		.sync
+		.initial_large_account_stale_gap;
+
+	let current_count = services.globals.current_count();
+	let mut capped_filter =
+		if since.is_none_or(|since| stale_since(current_count, since, stale_gap)) {
+			initial_capped_filter(&services, sender_user, &filter).await
+		} else {
+			None
+		};
 
 	let stop_at = sync_deadline(&services, body.body.timeout);
 
@@ -214,6 +223,7 @@ pub(crate) async fn sync_events_route(
 		}
 
 		if since.is_none_or(|since| since < next_batch) || full_state {
+			let capped = capped_filter.take();
 			let response = build_sync_events(Params {
 				services: &services,
 				sender_user,
@@ -222,10 +232,7 @@ pub(crate) async fn sync_events_route(
 				next_batch,
 				full_state,
 				state_after,
-				filter: capped_filter
-					.as_ref()
-					.filter(|_| since.is_none())
-					.unwrap_or(&filter),
+				filter: capped.as_ref().unwrap_or(&filter),
 			})
 			.await?;
 
@@ -292,7 +299,7 @@ async fn initial_capped_filter(
 		user_id = %sender_user,
 		rooms,
 		%limit,
-		"capping the timeline of an initial sync"
+		"capping the timeline of an initial or stale sync"
 	);
 
 	let mut filter = filter.clone();

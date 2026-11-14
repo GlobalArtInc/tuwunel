@@ -1,10 +1,6 @@
 #![cfg(test)]
 
-use std::{fs::remove_dir_all, net::TcpListener};
-
-use futures::future::join;
 use serde_json::{Value, json};
-use tuwunel::{Args, Runtime, Server, async_run, async_start, async_stop};
 use tuwunel_core::{
 	Result, err, implement,
 	ruma::{OwnedRoomId, RoomId},
@@ -13,11 +9,13 @@ use tuwunel_service::Services;
 
 use self::{
 	client::{Client, field, register, wait_until_ready},
+	fixture::boot,
 	require::require,
 	sync::joined_room,
 };
 
 mod client;
+mod fixture;
 
 #[path = "client/message.rs"]
 mod message;
@@ -37,48 +35,98 @@ const SMALL_TOKEN: &str = "sync-initial-large-account-small-token";
 const FILTER: &str = r#"{"room":{"timeline":{"limit":20}}}"#;
 const MESSAGES: usize = 5;
 
+const OPTIONS: [&str; 3] = [
+	"logging.global_default=false",
+	"client.sync.initial_large_account_rooms=2",
+	"client.sync.initial_large_account_timeline_limit=1",
+];
+
 #[test]
 fn initial_sync_of_a_large_account_caps_the_timeline() -> Result {
-	let listener = TcpListener::bind(("127.0.0.1", 0))?;
-	let port = listener.local_addr()?.port();
+	boot("sync-initial-large-account", OPTIONS, exercise)
+}
 
-	let db_path = Args::test_database_path("sync-initial-large-account");
+#[test]
+fn stale_token_of_a_large_account_caps_the_first_timeline() -> Result {
+	let options = [
+		OPTIONS[0],
+		OPTIONS[1],
+		OPTIONS[2],
+		"client.sync.initial_large_account_stale_gap=1",
+	];
 
-	let args = Args::default_test(&["fresh", "cleanup"])
-		.with_database_path(&db_path)
-		.with_loopback_listener(port)
-		.with_option("listening=true")
-		.with_option("client.sync.initial_large_account_rooms=2")
-		.with_option("client.sync.initial_large_account_timeline_limit=1");
+	boot("sync-stale-large-account", options, capped_stale)
+}
 
-	let runtime = Runtime::new(Some(&args))?;
-	let server = Server::new(Some(&args), Some(&runtime))?;
-	let result = runtime.block_on(async {
-		let services = async_start(&server).await?;
-		let base = format!("http://127.0.0.1:{port}");
+#[test]
+fn stale_check_off_leaves_the_timeline_whole() -> Result {
+	let options = [
+		OPTIONS[0],
+		OPTIONS[1],
+		OPTIONS[2],
+		"client.sync.initial_large_account_stale_gap=0",
+	];
 
-		drop(listener);
+	boot("sync-stale-check-off", options, whole_stale)
+}
 
-		let exercise = async {
-			let outcome = exercise(&services, &base).await;
-			let shutdown = server.server.shutdown();
+#[test]
+fn recent_token_within_the_gap_leaves_the_timeline_whole() -> Result {
+	let options = [
+		OPTIONS[0],
+		OPTIONS[1],
+		OPTIONS[2],
+		"client.sync.initial_large_account_stale_gap=1000000",
+	];
 
-			outcome.and(shutdown)
-		};
+	boot("sync-stale-within-gap", options, whole_stale)
+}
 
-		let (run_result, outcome) = join(async_run(&server), exercise).await;
+async fn capped_stale(services: &Services, base: &str) -> Result {
+	stale(services, base, true).await
+}
 
-		drop(services);
-		async_stop(&server).await?;
-		run_result?;
+async fn whole_stale(services: &Services, base: &str) -> Result {
+	stale(services, base, false).await
+}
 
-		outcome
-	});
+async fn stale(services: &Services, base: &str, capped: bool) -> Result {
+	wait_until_ready(services, base).await?;
 
-	drop(runtime);
-	remove_dir_all(&db_path).ok();
+	register(services, "staleaccount", LARGE_TOKEN).await?;
 
-	result
+	let client = Client { services, base, token: LARGE_TOKEN };
+	let rooms = rooms_with_messages(&client, 3).await?;
+	let since = field(&client.sync(None).await?, "next_batch")?.to_owned();
+
+	for room in &rooms {
+		for index in 0..4 {
+			client
+				.send_text(room, &format!("new-{index}"), &format!("new{index}"))
+				.await?;
+		}
+	}
+
+	let response = client.sync(Some(&since)).await?;
+
+	for room in &rooms {
+		let section = joined_room(&response, room)?;
+		let events = timeline_events(section, room)?.len();
+
+		if capped {
+			require(events == 1, "the stale token's first response was not trimmed")?;
+			require(limited(section), "the trimmed stale response was not marked limited")?;
+			require(
+				section["timeline"]["prev_batch"].is_string(),
+				"the trimmed stale response carried no prev_batch",
+			)?;
+		} else {
+			require(events == 4, "a response that must stay whole was trimmed")?;
+			require(!limited(section), "a response that must stay whole was marked limited")?;
+		}
+	}
+
+	Ok(())
 }
 
 async fn exercise(services: &Services, base: &str) -> Result {

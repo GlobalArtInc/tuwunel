@@ -112,15 +112,18 @@ pub struct Sync {
 	#[serde(default)]
 	pub fastpath_verify: bool,
 
-	/// Joined-room count above which an initial legacy sync, one without
-	/// `since`, caps the timeline of every room.
+	/// Joined-room count above which an initial legacy sync caps the timeline
+	/// of every room.
 	///
-	/// An account with thousands of rooms cannot be answered in reasonable
-	/// time with the full timeline the client asks for. Past this count the
-	/// timeline limit is lowered to `initial_large_account_timeline_limit`; a
-	/// room with more events is marked `limited` and carries a `prev_batch`
-	/// token, so the client loads the earlier history when it opens the room.
-	/// Incremental syncs are not affected. 0 disables the cap.
+	/// An initial sync is one without `since` or with a stale one, see
+	/// `initial_large_account_stale_gap`. An account with thousands of rooms
+	/// cannot be answered in reasonable time with the full timeline the client
+	/// asks for. Past this count the timeline limit is lowered to
+	/// `initial_large_account_timeline_limit`; a room with more events is
+	/// marked `limited` and carries a `prev_batch` token, so the client loads
+	/// the earlier history when it opens the room. Only the first response of
+	/// a request is capped, and syncs from a recent `since` are not affected.
+	/// 0 disables the cap.
 	///
 	/// reloadable: yes
 	/// default: 1000
@@ -138,6 +141,19 @@ pub struct Sync {
 	/// default: 1
 	#[serde(default = "default_initial_large_account_timeline_limit")]
 	pub initial_large_account_timeline_limit: usize,
+
+	/// Number of changes by which a numeric `since` token may trail the
+	/// server's current counter before legacy sync treats it as stale.
+	///
+	/// A client that keeps a token from long ago would otherwise be sent every
+	/// change of every room of its account. The first response to a stale
+	/// token gets the same timeline cap as an initial sync, for accounts above
+	/// `initial_large_account_rooms`. 0 disables the check.
+	///
+	/// reloadable: yes
+	/// default: 100000
+	#[serde(default = "default_initial_large_account_stale_gap")]
+	pub initial_large_account_stale_gap: u64,
 }
 
 impl Default for Sync {
@@ -151,6 +167,7 @@ impl Default for Sync {
 			fastpath_verify: false,
 			initial_large_account_rooms: default_initial_large_account_rooms(),
 			initial_large_account_timeline_limit: default_initial_large_account_timeline_limit(),
+			initial_large_account_stale_gap: default_initial_large_account_stale_gap(),
 		}
 	}
 }
@@ -164,3 +181,5 @@ fn default_timeout_max() -> u64 { 90000 }
 fn default_initial_large_account_rooms() -> usize { 1000 }
 
 fn default_initial_large_account_timeline_limit() -> usize { 1 }
+
+fn default_initial_large_account_stale_gap() -> u64 { 100_000 }

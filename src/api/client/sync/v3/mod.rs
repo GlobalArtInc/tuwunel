@@ -112,6 +112,10 @@ fn capped_timeline_limit(
 	(requested > cap).then_some(cap)
 }
 
+fn stale_since(current: u64, since: u64, gap: u64) -> bool {
+	gap > 0 && current.saturating_sub(since) > gap
+}
+
 // Keep diagnostic macro expansions under the original tracing target.
 fn log_future_since(since: Option<u64>, next_batch: u64) {
 	debug_error!(?since, next_batch, "received since > next_batch, clamping");

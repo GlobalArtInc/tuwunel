@@ -543,7 +543,7 @@ fn sync_initial_large_account_defaults_and_reload() {
 	let default = default_config();
 	let tuned = config_from_toml(
 		"[global.client.sync]\ninitial_large_account_rooms = \
-		 0\ninitial_large_account_timeline_limit = 5\n",
+		 0\ninitial_large_account_timeline_limit = 5\ninitial_large_account_stale_gap = 7\n",
 	)
 	.unwrap();
 
@@ -551,8 +551,10 @@ fn sync_initial_large_account_defaults_and_reload() {
 
 	assert_eq!(default_sync.initial_large_account_rooms, 1000);
 	assert_eq!(default_sync.initial_large_account_timeline_limit, 1);
+	assert_eq!(default_sync.initial_large_account_stale_gap, 100_000);
 	assert_eq!(tuned_sync.initial_large_account_rooms, 0);
 	assert_eq!(tuned_sync.initial_large_account_timeline_limit, 5);
+	assert_eq!(tuned_sync.initial_large_account_stale_gap, 7);
 	reload(&default, &tuned).expect("initial large account settings should reload");
 }
 
