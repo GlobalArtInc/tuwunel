@@ -104,6 +104,10 @@ pub(crate) async fn start(server: Arc<Server>) -> Result<Arc<Services>> {
 		abort.abort();
 	}}
 
+	if server.config.metrics.enable && server.config.listening {
+		server.metrics.enable_prometheus();
+	}
+
 	let services = async move { Services::build(server).await?.start().await }.await;
 
 	reporter.abort();

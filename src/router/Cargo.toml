@@ -97,6 +97,7 @@ zstd_compression = [
 ]
 
 [dependencies]
+aws-lc-rs.workspace = true
 axum-server-dual-protocol.workspace = true
 axum-server-dual-protocol.optional = true
 axum-server.workspace = true

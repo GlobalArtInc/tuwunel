@@ -1,3 +1,4 @@
+mod metrics;
 mod plain;
 #[cfg(test)]
 mod tests;
@@ -81,6 +82,7 @@ pub(super) async fn serve(services: Arc<Services>, handle: ServerHandle) -> Resu
 
 	let defaulted = config.is_address_defaulted();
 	let tcp_listeners = bind_addrs(&addrs, &mut listening, defaulted)?;
+	let metrics_listener = metrics::bind(server)?;
 
 	#[cfg(unix)]
 	let log_addrs = make_log_addrs(
@@ -151,12 +153,20 @@ pub(super) async fn serve(services: Arc<Services>, handle: ServerHandle) -> Resu
 		futures.extend(plain_futures);
 	}
 
+	let metrics_future = metrics_listener
+		.map(|listener| metrics::serve(server, &handle.handle_ip, listener))
+		.transpose()?;
+
 	for future in futures {
 		join_set.spawn_on(future, server.runtime());
 	}
 
 	if join_set.is_empty() {
 		return Err!("at least one listener should be installed");
+	}
+
+	if let Some(future) = metrics_future {
+		join_set.spawn_on(future, server.runtime());
 	}
 
 	info!("Listening on {log_addrs:?}");

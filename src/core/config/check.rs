@@ -245,6 +245,19 @@ fn check_metrics(config: &Config) -> Result {
 		));
 	}
 
+	if !metrics.address.is_loopback()
+		&& metrics.bearer_token.is_none()
+		&& metrics.bearer_token_file.is_none()
+	{
+		warn!(
+			address = %metrics.address,
+			port = metrics.port,
+			"The metrics listener is reachable beyond loopback and no bearer token is set, so \
+			 anyone who can connect to it can read the server metrics. Set \
+			 metrics.bearer_token or metrics.bearer_token_file, or restrict access to the port."
+		);
+	}
+
 	Ok(())
 }
 

@@ -175,7 +175,7 @@ where
 	feature = "gzip_compression",
 	feature = "brotli_compression"
 ))]
-fn compression_layer(server: &Server) -> tower_http::compression::CompressionLayer {
+pub(crate) fn compression_layer(server: &Server) -> tower_http::compression::CompressionLayer {
 	let mut compression_layer = tower_http::compression::CompressionLayer::new();
 
 	#[cfg(feature = "zstd_compression")]

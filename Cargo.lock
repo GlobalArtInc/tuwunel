@@ -5741,6 +5741,7 @@ dependencies = [
 name = "tuwunel_router"
 version = "2.0.0"
 dependencies = [
+ "aws-lc-rs",
  "axum",
  "axum-server",
  "axum-server-dual-protocol",

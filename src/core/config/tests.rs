@@ -2292,3 +2292,26 @@ fn metrics_token_and_intervals_reload() {
 	reload(&moved, &default)
 		.expect("a reverted enable, address and port is ignored until restart, not refused");
 }
+
+#[test]
+fn metrics_beyond_loopback_without_a_token_is_warned() {
+	let rows = [
+		("[global.metrics]\nenable = true\naddress = \"0.0.0.0\"\n", true),
+		("[global.metrics]\nenable = true\naddress = \"::\"\n", true),
+		("[global.metrics]\nenable = true\naddress = \"::1\"\n", false),
+		("[global.metrics]\nenable = true\n", false),
+		(
+			"[global.metrics]\nenable = true\naddress = \"0.0.0.0\"\nbearer_token = \"a\"\n",
+			false,
+		),
+		("[global.metrics]\naddress = \"0.0.0.0\"\n", false),
+	];
+
+	for (toml, warned) in rows {
+		let config = config_from_toml(toml).expect("the config should parse");
+		let (result, logs) = check_with_captured_logs(&config);
+
+		result.expect("an exposed metrics listener should warn rather than refuse the config");
+		assert_eq!(logs.contains("reachable beyond loopback"), warned, "{toml}: {logs}");
+	}
+}

@@ -6,6 +6,8 @@ mod request;
 mod router;
 mod run;
 mod serve;
+#[cfg(test)]
+mod test_server;
 
 use std::{panic::AssertUnwindSafe, pin::Pin, sync::Arc};
 
