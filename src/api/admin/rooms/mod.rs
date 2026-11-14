@@ -21,18 +21,19 @@ use futures::{
 	future::{join, join3, join5},
 };
 use ruma::{
-	RoomId, UInt,
+	OwnedRoomAliasId, OwnedUserId, RoomId, UInt,
 	events::{
 		StateEventType,
 		room::{
-			guest_access::RoomGuestAccessEventContent,
-			history_visibility::RoomHistoryVisibilityEventContent,
+			guest_access::{GuestAccess, RoomGuestAccessEventContent},
+			history_visibility::{HistoryVisibility, RoomHistoryVisibilityEventContent},
 		},
 	},
+	room::JoinRuleKind,
 	uint,
 };
 use synapse_admin_api::rooms::list_rooms::v1::RoomDetails;
-use tuwunel_core::{Result, utils::TryFutureExtExt};
+use tuwunel_core::utils::TryFutureExtExt;
 use tuwunel_matrix::Event;
 use tuwunel_service::Services;
 
@@ -70,85 +71,49 @@ const PURGE_HISTORY_ACTION: &str = "purge_history";
 /// Assembles the shared per-room summary row returned by both the room-list and
 /// room-details endpoints.
 async fn room_row(services: &Services, room_id: &RoomId) -> RoomDetails {
-	let name = services.state_accessor.get_name(room_id).ok();
+	let name = room_name(services, room_id);
 
-	let canonical_alias = services
-		.state_accessor
-		.get_canonical_alias(room_id)
-		.ok();
+	let canonical_alias = room_canonical_alias(services, room_id);
 
 	let room_type = services
 		.state_accessor
 		.get_room_type(room_id)
 		.ok();
 
-	let encryption = services
-		.state_accessor
-		.get_room_encryption(room_id)
-		.map_ok(|algorithm| algorithm.to_string())
-		.ok();
+	let encryption = room_encryption(services, room_id);
 
-	let join_rules = services
-		.state_accessor
-		.get_join_rules(room_id)
-		.map(|join_rule| Some(join_rule.kind()));
+	let join_rules = room_join_rules(services, room_id);
 
-	let guest_access = services
-		.state_accessor
-		.room_state_get_content(room_id, &StateEventType::RoomGuestAccess, "")
-		.map_ok(|content: RoomGuestAccessEventContent| content.guest_access)
-		.ok();
+	let guest_access = room_guest_access(services, room_id);
 
-	let history_visibility = services
-		.state_accessor
-		.room_state_get_content(room_id, &StateEventType::RoomHistoryVisibility, "")
-		.map_ok(|content: RoomHistoryVisibilityEventContent| content.history_visibility)
-		.ok();
+	let history_visibility = room_history_visibility(services, room_id);
 
-	let create = services
-		.state_accessor
-		.get_create(room_id)
-		.map(Result::ok);
+	let creator = room_creator(services, room_id);
 
-	let version = services
-		.state
-		.get_room_version(room_id)
-		.map_ok(|version| version.to_string())
-		.ok();
+	let version = room_version(services, room_id);
 
-	let public = services.directory.is_public_room(room_id);
+	let public = room_public(services, room_id);
 
-	let joined_members = services
-		.state_cache
-		.room_joined_count(room_id)
-		.map(|count| count_to_uint(count.ok()));
+	let joined_members = room_joined_members(services, room_id);
 
-	let joined_local_members = services
-		.state_cache
-		.local_users_in_room(room_id)
-		.count()
-		.map(usize_to_uint);
+	let joined_local_members = room_joined_local_members(services, room_id);
 
 	let state_events = state_event_count(services, room_id);
 
 	let (
 		(name, canonical_alias, room_type, encryption, join_rules),
-		(guest_access, history_visibility, create, version, public),
+		(guest_access, history_visibility, (creator, federatable), version, public),
 		(joined_members, joined_local_members, state_events),
 	) = join(
 		join5(name, canonical_alias, room_type, encryption, join_rules),
 		join(
-			join5(guest_access, history_visibility, create, version, public),
+			join5(guest_access, history_visibility, creator, version, public),
 			join3(joined_members, joined_local_members, state_events),
 		),
 	)
 	.map(|(head, (mid, tail))| (head, mid, tail))
 	.boxed() // size firewall
 	.await;
-
-	let (creator, federatable) = create
-		.map(|create| (Some(create.sender().to_owned()), create.federate().unwrap_or(true)))
-		.unwrap_or((None, true));
 
 	RoomDetails {
 		room_id: room_id.to_owned(),
@@ -167,6 +132,103 @@ async fn room_row(services: &Services, room_id: &RoomId) -> RoomDetails {
 		state_events,
 		room_type,
 	}
+}
+
+async fn room_name(services: &Services, room_id: &RoomId) -> Option<String> {
+	services
+		.state_accessor
+		.get_name(room_id)
+		.ok()
+		.await
+}
+
+async fn room_canonical_alias(services: &Services, room_id: &RoomId) -> Option<OwnedRoomAliasId> {
+	services
+		.state_accessor
+		.get_canonical_alias(room_id)
+		.ok()
+		.await
+}
+
+async fn room_encryption(services: &Services, room_id: &RoomId) -> Option<String> {
+	services
+		.state_accessor
+		.get_room_encryption(room_id)
+		.map_ok(|algorithm| algorithm.to_string())
+		.ok()
+		.await
+}
+
+async fn room_join_rules(services: &Services, room_id: &RoomId) -> Option<JoinRuleKind> {
+	let join_rule = services
+		.state_accessor
+		.get_join_rules(room_id)
+		.await;
+
+	Some(join_rule.kind())
+}
+
+async fn room_guest_access(services: &Services, room_id: &RoomId) -> Option<GuestAccess> {
+	services
+		.state_accessor
+		.room_state_get_content(room_id, &StateEventType::RoomGuestAccess, "")
+		.map_ok(|content: RoomGuestAccessEventContent| content.guest_access)
+		.ok()
+		.await
+}
+
+async fn room_history_visibility(
+	services: &Services,
+	room_id: &RoomId,
+) -> Option<HistoryVisibility> {
+	services
+		.state_accessor
+		.room_state_get_content(room_id, &StateEventType::RoomHistoryVisibility, "")
+		.map_ok(|content: RoomHistoryVisibilityEventContent| content.history_visibility)
+		.ok()
+		.await
+}
+
+async fn room_creator(services: &Services, room_id: &RoomId) -> (Option<OwnedUserId>, bool) {
+	services
+		.state_accessor
+		.get_create(room_id)
+		.await
+		.ok()
+		.map(|create| (Some(create.sender().to_owned()), create.federate().unwrap_or(true)))
+		.unwrap_or((None, true))
+}
+
+async fn room_version(services: &Services, room_id: &RoomId) -> Option<String> {
+	services
+		.state
+		.get_room_version(room_id)
+		.map_ok(|version| version.to_string())
+		.ok()
+		.await
+}
+
+async fn room_public(services: &Services, room_id: &RoomId) -> bool {
+	services.directory.is_public_room(room_id).await
+}
+
+async fn room_joined_members(services: &Services, room_id: &RoomId) -> UInt {
+	let count = services
+		.state_cache
+		.room_joined_count(room_id)
+		.await;
+
+	count_to_uint(count.ok())
+}
+
+async fn room_joined_local_members(services: &Services, room_id: &RoomId) -> UInt {
+	let count = services
+		.state_cache
+		.local_users_in_room(room_id)
+		.count()
+		.await;
+
+	usize_to_uint(count)
 }
 
 async fn state_event_count(services: &Services, room_id: &RoomId) -> UInt {
