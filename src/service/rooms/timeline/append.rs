@@ -622,6 +622,13 @@ async fn append_message_effects(
 fn append_pdu_json(&self, pdu_id: &RawPduId, pdu: &PduEvent, json: &CanonicalJsonObject) {
 	debug_assert!(matches!(pdu_id.pdu_count(), PduCount::Normal(_)), "PduCount not Normal");
 
+	if let PduCount::Normal(count) = pdu_id.pdu_count() {
+		self.services
+			.sync
+			.journal
+			.record(count, pdu.room_id(), None);
+	}
+
 	let mut txn = self.db.db.txn();
 
 	txn.raw_put(&self.db.pduid_pdu, pdu_id, Json(json));

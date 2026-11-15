@@ -26,7 +26,8 @@ pub use self::{
 	runtime::{Runtime, RuntimeSample},
 	storage::{Op, PROVIDER_CAP, Storage, StoreResult},
 	sync::{
-		Build, Fastpath, LongPoll, Pass, Phase, Reply, Section, SinceKind, SyncMetrics, WatchPart,
+		Build, Fastpath, JournalKind, LongPoll, Pass, Phase, Reply, Section, SinceKind,
+		SyncMetrics, WatchPart,
 	},
 	types::{Counter, Gauge, Histogram, Metric, Seen, Timer},
 	write::{Kind, Le, Scale, Value, Writer, push_label},

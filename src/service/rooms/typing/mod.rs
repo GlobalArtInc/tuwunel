@@ -77,6 +77,11 @@ impl Service {
 
 		let count = self.services.globals.next_count();
 
+		self.services
+			.sync
+			.journal
+			.record(*count, room_id, None);
+
 		room.update = *count;
 
 		drop(typing);
@@ -125,6 +130,11 @@ impl Service {
 		room.users.remove(user_id);
 
 		let count = self.services.globals.next_count();
+
+		self.services
+			.sync
+			.journal
+			.record(*count, room_id, None);
 
 		room.update = *count;
 
@@ -237,6 +247,11 @@ impl Service {
 
 		// update clients
 		let count = self.services.globals.next_count();
+
+		self.services
+			.sync
+			.journal
+			.record(*count, room_id, None);
 
 		room.update = *count;
 

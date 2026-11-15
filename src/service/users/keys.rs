@@ -1189,6 +1189,11 @@ pub async fn mark_device_key_update(
 		.rooms_joined(user_id)
 		.filter(|room_id| all_or_is_encrypted(*room_id))
 		.ready_for_each(|room_id| {
+			self.services
+				.sync
+				.journal
+				.record(*count, room_id, None);
+
 			let room_key = (room_id, *count);
 			self.db
 				.keychangeid_userid

@@ -5,8 +5,8 @@ use regex::Regex;
 
 use super::{
 	APPSERVICE_CAP, Api, Build, CacheSample, Condition, Counter, DynFamily, EnumFamily, Fastpath,
-	Gauge, Histogram, MAX_KEY_LEN, Metric, OTHER, Op, PROVIDER_CAP, Pass, Phase, Registry, Reply,
-	RocksSample, Scale, Section, SendResult, SinceKind, WatchPart, Writer,
+	Gauge, Histogram, JournalKind, MAX_KEY_LEN, Metric, OTHER, Op, PROVIDER_CAP, Pass, Phase,
+	Registry, Reply, RocksSample, Scale, Section, SendResult, SinceKind, WatchPart, Writer,
 };
 use crate::label_set;
 
@@ -814,6 +814,40 @@ fn sync_v3_left_rooms_are_counted_per_build() {
 		"tuwunel_sync_v3_left_rooms_per_sync_bucket{le=\"10\"} 1\n",
 		"tuwunel_sync_v3_left_rooms_per_sync_bucket{le=\"20\"} 2\n",
 		"tuwunel_sync_v3_left_rooms_per_sync_count 2\n",
+	] {
+		assert!(text.contains(line), "{line}\n{text}");
+	}
+
+	assert!(parsed.samples <= registry.max_series());
+}
+
+#[test]
+fn sync_journal_is_counted_per_kind_and_its_size_is_a_gauge() {
+	let registry = Registry::new();
+	let group = &registry.sync;
+
+	group.set_journal_entries(40);
+	group.set_journal_entries(25);
+	group.journal_evicted(15);
+	group.journal_evicted(3);
+	group.journal_miss(JournalKind::PrivateRead);
+	group.journal_miss(JournalKind::DeviceLists);
+
+	assert_eq!(group.journal_held(), 25);
+	assert_eq!(group.journal_evicted_total(), 18);
+	assert_eq!(group.journal_missed(JournalKind::PrivateRead), 1);
+	assert_eq!(group.journal_missed(JournalKind::DeviceLists), 1);
+	assert_eq!(group.journal_missed(JournalKind::Timeline), 0);
+
+	let text = registry.render();
+	let parsed = parse(&text);
+
+	for line in [
+		"tuwunel_sync_journal_entries 25\n",
+		"tuwunel_sync_journal_evictions_total 18\n",
+		"tuwunel_sync_journal_misses_total{kind=\"private_read\"} 1\n",
+		"tuwunel_sync_journal_misses_total{kind=\"device_lists\"} 1\n",
+		"tuwunel_sync_journal_misses_total{kind=\"timeline\"} 0\n",
 	] {
 		assert!(text.contains(line), "{line}\n{text}");
 	}

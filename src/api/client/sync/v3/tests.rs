@@ -1,18 +1,21 @@
-use std::collections::BTreeMap;
+use std::{
+	cell::Cell,
+	collections::{BTreeMap, HashSet},
+};
 
 use ruma::{
-	EventId, OwnedEventId, UInt,
+	EventId, OwnedEventId, OwnedRoomId, UInt,
 	api::client::sync::sync_events::v3::{JoinedRoom, Response, State as RoomState, StateEvents},
 	room_id,
 	serde::Raw,
 	uint,
 };
-use tuwunel_core::metrics::prom::Registry;
+use tuwunel_core::metrics::prom::{JournalKind, Registry};
 
 use super::{
 	Since, StateAfter, capped_timeline_limit,
 	joined::{
-		fastpath::{Busy, Verdict},
+		fastpath::{Busy, Changed, Verdict},
 		notifications::{
 			GateInputs, Gates as NotificationGates,
 			assemble_threads as assemble_thread_notifications,
@@ -477,4 +480,52 @@ fn presence_with_to_device_is_not_held() {
 	response.to_device.events.push(raw_event());
 
 	assert!(!presence_only(&response));
+}
+
+#[test]
+fn only_busy_verdicts_with_a_journaled_cause_are_audited() {
+	let audited = [
+		(Busy::Timeline, JournalKind::Timeline),
+		(Busy::Typing, JournalKind::Typing),
+		(Busy::PrivateRead, JournalKind::PrivateRead),
+		(Busy::AccountData, JournalKind::AccountData),
+		(Busy::Receipts, JournalKind::Receipts),
+		(Busy::Notifications, JournalKind::Notifications),
+	];
+
+	for (busy, kind) in audited {
+		assert_eq!(busy.journal_kind(), Some(kind));
+	}
+
+	assert_eq!(Busy::NoTimelineCount.journal_kind(), None);
+	assert_eq!(Busy::Error.journal_kind(), None);
+}
+
+#[test]
+fn the_journal_is_asked_once_per_build_however_many_rooms_ask() {
+	let changed = Changed::default();
+	let asked = Cell::new(0_u32);
+	let ask = || {
+		asked.set(asked.get().saturating_add(1));
+
+		Some(HashSet::from([room_id!("!busy:localhost").to_owned()]))
+	};
+
+	let first = changed.rooms_with(ask).cloned();
+	let second = changed.rooms_with(ask).cloned();
+
+	assert_eq!(asked.get(), 1);
+	assert_eq!(first, second);
+	assert_eq!(first.map(|rooms| rooms.len()), Some(1));
+
+	let unanswered = Changed::default();
+	let none = || -> Option<HashSet<OwnedRoomId>> {
+		asked.set(asked.get().saturating_add(1));
+
+		None
+	};
+
+	assert_eq!(unanswered.rooms_with(none), None);
+	assert_eq!(unanswered.rooms_with(none), None);
+	assert_eq!(asked.get(), 2);
 }

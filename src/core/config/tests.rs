@@ -554,6 +554,15 @@ fn sync_presence_only_min_rooms_default_off_and_reload() {
 }
 
 #[test]
+fn sync_journal_capacity_defaults_to_a_bounded_journal_and_zero_turns_it_off() {
+	let default = default_config();
+	let off = config_from_toml("[global.client.sync]\njournal_capacity = 0\n").unwrap();
+
+	assert_eq!(default.client.sync.journal_capacity, 100_000);
+	assert_eq!(off.client.sync.journal_capacity, 0);
+}
+
+#[test]
 fn sync_initial_large_account_defaults_and_reload() {
 	let default = default_config();
 	let tuned = config_from_toml(

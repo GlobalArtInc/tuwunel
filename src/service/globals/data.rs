@@ -33,9 +33,10 @@ pub(super) type Permit = TwoPhasePermit<Callback>;
 type Counter = TwoPhaseCounter<Callback>;
 type Callback = Box<dyn Fn(u64) -> Result + Send + Sync>;
 
-const COUNTER: &[u8] = b"c";
-
 impl Data {
+	/// Key of the persisted global counter in the global map.
+	pub(crate) const COUNTER: &[u8] = b"c";
+
 	/// Restores the global counter and initializes retirement notifications.
 	///
 	/// A fresh database starts at zero, making one the first dispatched sequence number.
@@ -124,14 +125,14 @@ impl Data {
 	#[tracing::instrument(name = "dispatch", level = "debug", skip(db, global))]
 	fn store_count(db: &Arc<Database>, global: &Arc<Map>, count: u64) -> Result {
 		let _cork = db.cork();
-		global.insert(COUNTER, count.to_be_bytes());
+		global.insert(Self::COUNTER, count.to_be_bytes());
 
 		Ok(())
 	}
 
 	fn stored_count(global: &Arc<Map>) -> Result<u64> {
 		global
-			.get_blocking(COUNTER)
+			.get_blocking(Self::COUNTER)
 			.as_deref()
 			.map_or(Ok(0_u64), utils::u64_from_bytes)
 	}

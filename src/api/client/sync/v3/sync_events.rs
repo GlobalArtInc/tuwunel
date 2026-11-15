@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::{
+	collections::{BTreeMap, HashMap, HashSet},
+	sync::Arc,
+};
 
 use axum::extract::State;
 use futures::{
@@ -48,7 +51,7 @@ use super::{
 		invite_permitted, long_poll, profiles::collect as collect_profiles, share_encrypted_room,
 	},
 	Since, StateAfter, capped_timeline_limit,
-	joined::fastpath::{Tally, load_room_or_skip},
+	joined::fastpath::{Changed, Tally, load_room_or_skip},
 	left::collect_rooms as collect_left_rooms,
 	log_future_since,
 	phase::timed,
@@ -740,6 +743,8 @@ fn collect_joined_rooms<'a>(
 	Output = (BTreeMap<OwnedRoomId, JoinedRoom>, HashSet<OwnedUserId>, HashSet<OwnedUserId>),
 > + Send
 + 'a {
+	let changed = Arc::new(Changed::default());
+
 	services
 		.state_cache
 		.rooms_joined(sender_user)
@@ -756,6 +761,7 @@ fn collect_joined_rooms<'a>(
 				full_state,
 				state_after,
 				filter,
+				Arc::clone(&changed),
 			)
 			.map_ok(move |(joined_room, dlu, jeu, verdict)| {
 				(room_id, joined_room, dlu, jeu, verdict)

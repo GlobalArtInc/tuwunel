@@ -106,6 +106,9 @@ shares the `_other` series.
 | `tuwunel_sync_v3_response_sections_total` | counter | `section` |
 | `tuwunel_sync_v3_left_rooms_per_sync` | histogram | none |
 | `tuwunel_sync_fastpath_mismatches_total` | counter | none |
+| `tuwunel_sync_journal_entries` | gauge | none |
+| `tuwunel_sync_journal_evictions_total` | counter | none |
+| `tuwunel_sync_journal_misses_total` | counter | `kind` |
 | `tuwunel_sync_v5_pass_seconds` | histogram | `pass` |
 | `tuwunel_sync_v5_response_rooms` | histogram | none |
 | `tuwunel_sync_v5_unknown_pos_total` | counter | none |
@@ -147,6 +150,20 @@ responses that carry data, so one response can count several. `section` is
 `rooms`, `presence`, `account_data`, `device_lists`, `to_device` or `users`.
 `tuwunel_sync_v3_left_rooms_per_sync` counts the departed rooms one build walked,
 before the room filter.
+
+The sync journal is a bounded in-memory log of the rooms that changed, filled by
+every write the fast path probe looks at. It is checked in shadow only: the probe
+asks the journal about each room it finds busy or with a device-key change, and
+the answers to clients do not depend on it. The journal is written whether or not
+`fastpath` is on. `tuwunel_sync_journal_entries` is the number of changes held and
+stays at zero when `journal_capacity` is 0. `tuwunel_sync_journal_evictions_total`
+counts changes dropped to stay within the capacity. `tuwunel_sync_journal_misses_total`
+counts rooms the probe found changed that the journal held no change for, by `kind`:
+`timeline`, `typing`, `private_read`, `account_data`, `receipts`, `notifications`
+or `device_lists`. It should stay at zero; a nonzero value means a write the
+journal does not record. Rooms asked about a `since` older than the journal covers
+are not counted. `journal_capacity` is read once at startup, so changing it needs
+a restart.
 
 ### Database
 

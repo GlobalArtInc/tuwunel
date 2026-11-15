@@ -153,6 +153,26 @@ label_set! {
 	}
 }
 
+label_set! {
+	/// The fast path finding that the change journal failed to account for.
+	pub enum JournalKind("kind") {
+		/// A new event was in the timeline.
+		Timeline => "timeline",
+		/// Typing changed.
+		Typing => "typing",
+		/// The user's private read marker changed.
+		PrivateRead => "private_read",
+		/// Account data of the room changed.
+		AccountData => "account_data",
+		/// Read receipts changed.
+		Receipts => "receipts",
+		/// Notification counts changed.
+		Notifications => "notifications",
+		/// A user's device keys changed in the room.
+		DeviceLists => "device_lists",
+	}
+}
+
 /// Metrics of the sync endpoints.
 pub struct SyncMetrics {
 	v3_build: EnumFamily<SinceKind, Histogram<15>>,
@@ -166,6 +186,9 @@ pub struct SyncMetrics {
 	v3_sections: EnumFamily<Section, Counter>,
 	v3_left_rooms_per_sync: Histogram<15>,
 	fastpath_mismatches: Counter,
+	journal_entries: Gauge,
+	journal_evictions: Counter,
+	journal_misses: EnumFamily<JournalKind, Counter>,
 	long_polls: EnumFamily<Api, Gauge>,
 	v5_pass: EnumFamily<Pass, Histogram<15>>,
 	v5_connections_loaded: Gauge,
@@ -199,6 +222,9 @@ impl SyncMetrics {
 			v3_sections: EnumFamily::new(Counter::new),
 			v3_left_rooms_per_sync: Histogram::new(&ROOMS),
 			fastpath_mismatches: Counter::new(),
+			journal_entries: Gauge::new(),
+			journal_evictions: Counter::new(),
+			journal_misses: EnumFamily::new(Counter::new),
 			long_polls: EnumFamily::new(Gauge::new),
 			v5_pass: EnumFamily::new(|| Histogram::seconds(&SECONDS)),
 			v5_connections_loaded: Gauge::new(),
@@ -268,6 +294,20 @@ impl SyncMetrics {
 	/// Counts a room where the verified fast path disagreed with the full
 	/// computation.
 	pub fn fastpath_mismatch(&self) { self.fastpath_mismatches.inc(); }
+
+	/// Stores the number of changes the sync journal holds.
+	pub fn set_journal_entries(&self, entries: u64) {
+		self.journal_entries.set_unsigned(entries);
+	}
+
+	#[inline]
+	/// Counts changes the sync journal dropped to stay within its capacity.
+	pub fn journal_evicted(&self, entries: u64) { self.journal_evictions.add(entries); }
+
+	#[inline]
+	/// Counts a room where the fast path found a change that the sync journal
+	/// did not hold.
+	pub fn journal_miss(&self, kind: JournalKind) { self.journal_misses.get(kind).inc(); }
 
 	#[inline]
 	/// Counts a request as waiting for activity until the guard is dropped.
@@ -361,6 +401,18 @@ impl SyncMetrics {
 	pub fn fastpath_mismatches(&self) -> u64 { self.fastpath_mismatches.get() }
 
 	#[must_use]
+	/// Returns the number of changes the sync journal holds.
+	pub fn journal_held(&self) -> i64 { self.journal_entries.get() }
+
+	#[must_use]
+	/// Returns the number of changes the sync journal dropped.
+	pub fn journal_evicted_total(&self) -> u64 { self.journal_evictions.get() }
+
+	#[must_use]
+	/// Returns the number of journal misses counted for a kind.
+	pub fn journal_missed(&self, kind: JournalKind) -> u64 { self.journal_misses.get(kind).get() }
+
+	#[must_use]
 	/// Returns the number of requests waiting for activity on an API.
 	pub fn long_polling(&self, api: Api) -> i64 { self.long_polls.get(api).get() }
 
@@ -444,6 +496,22 @@ impl SyncMetrics {
 			&self.fastpath_mismatches,
 		);
 		w.metric(
+			"tuwunel_sync_journal_entries",
+			"Changes the sync journal holds in memory, zero when the journal is off.",
+			&self.journal_entries,
+		);
+		w.metric(
+			"tuwunel_sync_journal_evictions_total",
+			"Changes the sync journal dropped to stay within its capacity.",
+			&self.journal_evictions,
+		);
+		w.metric(
+			"tuwunel_sync_journal_misses_total",
+			"Rooms where the fast path found a change that the sync journal did not hold, by \
+			 verdict; any count above zero means a write the journal does not record.",
+			&self.journal_misses,
+		);
+		w.metric(
 			"tuwunel_sync_long_polls",
 			"Sync requests waiting for activity, by API version.",
 			&self.long_polls,
@@ -509,6 +577,9 @@ impl SyncMetrics {
 			self.v3_sections.series(),
 			self.v3_left_rooms_per_sync.series(),
 			self.fastpath_mismatches.series(),
+			self.journal_entries.series(),
+			self.journal_evictions.series(),
+			self.journal_misses.series(),
 			self.long_polls.series(),
 			self.v5_pass.series(),
 			self.v5_connections_loaded.series(),

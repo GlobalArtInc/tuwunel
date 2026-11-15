@@ -34,6 +34,11 @@ type ThreadLastReads = BTreeMap<OwnedEventId, u64>;
 pub async fn reset_notification_counts(&self, user_id: &UserId, room_id: &RoomId) {
 	let count = self.services.globals.next_count();
 
+	self.services
+		.sync
+		.journal
+		.record(*count, room_id, Some(user_id));
+
 	let userroom_id = (user_id, room_id);
 
 	self.reset_notification_count(room_id, user_id, userroom_id)
@@ -83,6 +88,11 @@ pub async fn reset_thread_notification_counts(
 	thread_root: &EventId,
 ) {
 	let count = self.services.globals.next_count();
+
+	self.services
+		.sync
+		.journal
+		.record(*count, room_id, Some(user_id));
 
 	let userroom_thread = (user_id, room_id, thread_root);
 

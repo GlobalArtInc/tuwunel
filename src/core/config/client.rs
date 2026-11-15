@@ -133,6 +133,26 @@ pub struct Sync {
 	#[serde(default)]
 	pub presence_only_min_rooms: usize,
 
+	/// Number of changes the legacy sync journal holds in memory.
+	///
+	/// The journal records each room that changes in any of the streams the
+	/// `fastpath` probe reads. For now it only checks the probe: a room the
+	/// probe finds changed that the journal holds no change for is logged and
+	/// counted in `tuwunel_sync_journal_misses_total`, and no response depends
+	/// on it. The oldest changes are dropped past this number, and a request
+	/// older than what is left is not checked. 0 turns the journal off.
+	///
+	/// The journal is written whether or not `fastpath` is on. Each write takes
+	/// a lock and clones a room ID, and 100000 changes take roughly 10 to 15 MB
+	/// of memory (an estimate). One change of an account's keys is recorded
+	/// once for every room the account is in, so it takes that many changes.
+	///
+	/// It is read once at startup, so changing it needs a restart.
+	///
+	/// default: 100000
+	#[serde(default = "default_journal_capacity")]
+	pub journal_capacity: usize,
+
 	/// Joined-room count above which an initial legacy sync caps the timeline
 	/// of every room.
 	///
@@ -187,6 +207,7 @@ impl Default for Sync {
 			fastpath: false,
 			fastpath_verify: false,
 			presence_only_min_rooms: 0,
+			journal_capacity: default_journal_capacity(),
 			initial_large_account_rooms: default_initial_large_account_rooms(),
 			initial_large_account_timeline_limit: default_initial_large_account_timeline_limit(),
 			initial_large_account_stale_gap: default_initial_large_account_stale_gap(),
@@ -195,6 +216,8 @@ impl Default for Sync {
 }
 
 fn default_timeout_min() -> u64 { 5000 }
+
+fn default_journal_capacity() -> usize { 100_000 }
 
 fn default_timeout_default() -> u64 { 30000 }
 

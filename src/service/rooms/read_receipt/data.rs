@@ -135,6 +135,11 @@ impl Data {
 		let count = self.services.globals.next_count();
 		let latest_id = (room_id, *count, user_id, thread_kind);
 
+		self.services
+			.sync
+			.journal
+			.record(*count, room_id, None);
+
 		let mut txn = superseded
 			.iter()
 			.fold(self.services.db.txn(), |mut txn, key| {
@@ -293,6 +298,11 @@ impl Data {
 		let ts = u64::from(ts.get());
 
 		if let Some(next_count) = next_count.as_deref() {
+			self.services
+				.sync
+				.journal
+				.record(*next_count, room_id, Some(user_id));
+
 			txn.put(&self.roomuserid_lastprivatereadupdate, (room_id, user_id), *next_count);
 			txn.put(&self.roomuserid_privatereadsync, (room_id, user_id), *next_count);
 			txn.put(

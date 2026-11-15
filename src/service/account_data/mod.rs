@@ -133,6 +133,13 @@ pub async fn update(
 	let count = self.services.globals.next_count();
 	let roomuserdataid = (room_id, user_id, *count, &event_type);
 
+	if let Some(room_id) = room_id {
+		self.services
+			.sync
+			.journal
+			.record(*count, room_id, Some(user_id));
+	}
+
 	let mut txn = self.services.db.txn();
 
 	txn.put(&self.db.roomuserdataid_accountdata, roomuserdataid, Json(data));

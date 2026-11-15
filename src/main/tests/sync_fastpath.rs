@@ -7,7 +7,7 @@ use serde_json::{Map, Value, json};
 use tuwunel::{Args, Runtime, Server, async_run, async_start, async_stop};
 use tuwunel_core::{
 	Result, err, implement,
-	metrics::prom::{Api, Fastpath, Reply, SinceKind},
+	metrics::prom::{Api, Fastpath, JournalKind, Reply, SinceKind},
 	ruma::{MilliSecondsSinceUnixEpoch, RoomId, events::receipt::ReceiptThread},
 };
 use tuwunel_service::{Services, rooms::read_receipt::PrivateRead, users::DeviceListChange};
@@ -102,6 +102,8 @@ fn run(option: &str, verify: bool) -> Result {
 
 async fn exercise(services: &Services, base: &str, verify: bool) -> Result {
 	wait_until_ready(services, base).await?;
+
+	let started = services.globals.current_count();
 
 	let (alice_id, alice) = account(services, base, "fpalice", ALICE_TOKEN).await?;
 	let (bob_id, bob) = account(services, base, "fpbob", BOB_TOKEN).await?;
@@ -291,10 +293,10 @@ async fn exercise(services: &Services, base: &str, verify: bool) -> Result {
 		.sees("unread_thread_notifications", later.as_str())
 		.await?;
 
-	finish(services, verify)
+	finish(services, verify, started)
 }
 
-fn finish(services: &Services, verify: bool) -> Result {
+fn finish(services: &Services, verify: bool, started: u64) -> Result {
 	require(
 		!verify || services.sync.fastpath_mismatches() == 0,
 		"the verification mode recorded a mismatch",
@@ -328,8 +330,34 @@ fn finish(services: &Services, verify: bool) -> Result {
 		"the data responses were not counted",
 	)?;
 
-	require(sync.long_polling(Api::V3) == 0, "a long poll was left in the gauge")
+	require(sync.long_polling(Api::V3) == 0, "a long poll was left in the gauge")?;
+
+	let journal = &services.sync.journal;
+
+	require(
+		!journal.is_empty() && journal.horizon() <= started,
+		"the journal did not cover the writes of the test",
+	)?;
+
+	for kind in JOURNAL_KINDS {
+		require(
+			sync.journal_missed(kind) == 0,
+			&format!("the journal missed a {kind:?} change the fast path found"),
+		)?;
+	}
+
+	Ok(())
 }
+
+const JOURNAL_KINDS: [JournalKind; 7] = [
+	JournalKind::Timeline,
+	JournalKind::Typing,
+	JournalKind::PrivateRead,
+	JournalKind::AccountData,
+	JournalKind::Receipts,
+	JournalKind::Notifications,
+	JournalKind::DeviceLists,
+];
 
 struct Watch<'a> {
 	alice: &'a Client<'a>,

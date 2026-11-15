@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, HashSet};
+use std::{
+	collections::{BTreeMap, HashSet},
+	sync::{Arc, OnceLock},
+};
 
 use futures::{StreamExt, future::join3, pin_mut};
 use ruma::{
@@ -7,7 +10,7 @@ use ruma::{
 };
 use tuwunel_core::{
 	Error, Result, debug, error,
-	metrics::prom::{Fastpath, SyncMetrics},
+	metrics::prom::{Fastpath, JournalKind, SyncMetrics},
 };
 use tuwunel_service::Services;
 
@@ -30,6 +33,20 @@ pub(in super::super) enum Busy {
 	Receipts,
 	Notifications,
 	Error,
+}
+
+impl Busy {
+	pub(in super::super) const fn journal_kind(self) -> Option<JournalKind> {
+		match self {
+			| Self::Timeline => Some(JournalKind::Timeline),
+			| Self::Typing => Some(JournalKind::Typing),
+			| Self::PrivateRead => Some(JournalKind::PrivateRead),
+			| Self::AccountData => Some(JournalKind::AccountData),
+			| Self::Receipts => Some(JournalKind::Receipts),
+			| Self::Notifications => Some(JournalKind::Notifications),
+			| Self::NoTimelineCount | Self::Error => None,
+		}
+	}
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -74,6 +91,33 @@ struct Round<'a> {
 	full_state: bool,
 	state_after: StateAfter,
 	filter: &'a FilterDefinition,
+	changed: &'a Changed,
+}
+
+/// The rooms the sync journal holds a change for, asked once and shared by
+/// every probe that uses it.
+///
+/// It answers for the user and `since` of the first probe to ask, so it is
+/// shared only by probes of one build.
+#[derive(Default)]
+pub(in super::super) struct Changed(OnceLock<Option<HashSet<OwnedRoomId>>>);
+
+impl Changed {
+	fn rooms(
+		&self,
+		services: &Services,
+		user: &UserId,
+		since: u64,
+	) -> Option<&HashSet<OwnedRoomId>> {
+		self.rooms_with(|| services.sync.journal.changed_rooms(user, since))
+	}
+
+	pub(in super::super) fn rooms_with(
+		&self,
+		ask: impl FnOnce() -> Option<HashSet<OwnedRoomId>>,
+	) -> Option<&HashSet<OwnedRoomId>> {
+		self.0.get_or_init(ask).as_ref()
+	}
 }
 
 impl Tally {
@@ -136,6 +180,7 @@ pub(in super::super) async fn load_room_or_skip(
 	full_state: bool,
 	state_after: StateAfter,
 	filter: &FilterDefinition,
+	changed: Arc<Changed>,
 ) -> Result<Outcome> {
 	let sync = services.config.client.sync;
 	let probing = (sync.fastpath || sync.fastpath_verify) && since != 0 && !full_state;
@@ -150,6 +195,7 @@ pub(in super::super) async fn load_room_or_skip(
 		full_state,
 		state_after,
 		filter,
+		changed: &changed,
 	};
 
 	if !probing {
@@ -248,14 +294,54 @@ impl Round<'_> {
 	}
 
 	async fn probe(self) -> Result<HashSet<OwnedUserId>, Busy> {
+		self.checks().await.inspect_err(|busy| {
+			if let Some(kind) = busy.journal_kind() {
+				self.audit(kind);
+			}
+		})?;
+
+		let updated = self.device_list_updates().await;
+
+		if !updated.is_empty() {
+			self.audit(JournalKind::DeviceLists);
+		}
+
+		Ok(updated)
+	}
+
+	async fn checks(self) -> Result<(), Busy> {
 		self.check_timeline().await?;
 		self.check_typing().await?;
 		self.check_private_read().await?;
 		self.check_account_data().await?;
 		self.check_receipts().await?;
-		self.check_notifications().await?;
+		self.check_notifications().await
+	}
 
-		Ok(self.device_list_updates().await)
+	fn audit(self, kind: JournalKind) {
+		let Self {
+			services,
+			sender_user,
+			room_id,
+			since,
+			changed,
+			..
+		} = self;
+
+		let rooms = changed.rooms(services, sender_user, since);
+
+		if !services.sync.journal.audit(kind, room_id, rooms) {
+			return;
+		}
+
+		debug!(
+			target: "tuwunel_api_client::sync::v3::fastpath",
+			%room_id,
+			%sender_user,
+			since,
+			?kind,
+			"sync journal holds no change for a room the probe found changed"
+		);
 	}
 
 	async fn check_timeline(self) -> Result<(), Busy> {

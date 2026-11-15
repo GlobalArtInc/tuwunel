@@ -1,3 +1,4 @@
+mod journal;
 mod watch;
 
 #[cfg(test)]
@@ -30,6 +31,8 @@ use tuwunel_core::{
 };
 use tuwunel_database::{Cbor, Deserialized, Map, serialize_val};
 
+pub use self::journal::Journal;
+use self::journal::counter_at_start;
 use crate::rooms::short::ShortStateHash;
 
 pub struct Service {
@@ -37,6 +40,7 @@ pub struct Service {
 	connections: Connections,
 	db: Data,
 	fastpath_mismatches: AtomicU64,
+	pub journal: Journal,
 }
 
 struct Data {
@@ -183,6 +187,12 @@ pub type RoomUpdate<'a> = (&'a RoomId, Option<DeliveredConfig>);
 
 impl crate::Service for Service {
 	fn build(args: &crate::Args<'_>) -> Result<Arc<Self>> {
+		let journal = Journal::new(
+			args.server.config.client.sync.journal_capacity,
+			counter_at_start(&args.db["global"])?,
+			args.server.metrics.clone(),
+		);
+
 		Ok(Arc::new(Self {
 			db: Data {
 				userdeviceconnid_conn: args.db["userdeviceconnid_conn"].clone(),
@@ -206,6 +216,7 @@ impl crate::Service for Service {
 			services: args.services.clone(),
 			connections: Default::default(),
 			fastpath_mismatches: AtomicU64::new(0),
+			journal,
 		}))
 	}
 
