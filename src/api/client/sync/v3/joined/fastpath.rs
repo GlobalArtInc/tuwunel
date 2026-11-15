@@ -330,7 +330,11 @@ impl Round<'_> {
 
 		let rooms = changed.rooms(services, sender_user, since);
 
-		if !services.sync.journal.audit(kind, room_id, rooms) {
+		if !services
+			.sync
+			.journal
+			.audit(kind, room_id, sender_user, since, rooms)
+		{
 			return;
 		}
 

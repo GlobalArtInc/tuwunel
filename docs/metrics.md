@@ -161,9 +161,10 @@ counts changes dropped to stay within the capacity. `tuwunel_sync_journal_misses
 counts rooms the probe found changed that the journal held no change for, by `kind`:
 `timeline`, `typing`, `private_read`, `account_data`, `receipts`, `notifications`
 or `device_lists`. It should stay at zero; a nonzero value means a write the
-journal does not record. Rooms asked about a `since` older than the journal covers
-are not counted. `journal_capacity` is read once at startup, so changing it needs
-a restart.
+journal does not record. A room a build's snapshot of the journal lacks is asked
+about again before it counts, since it may have changed after the snapshot. Rooms
+asked about a `since` older than the journal covers are not counted.
+`journal_capacity` is read once at startup, so changing it needs a restart.
 
 ### Database
 

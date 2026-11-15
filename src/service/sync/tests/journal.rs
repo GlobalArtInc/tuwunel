@@ -139,8 +139,9 @@ fn a_miss_is_counted_only_when_the_journal_answers_no() {
 	let held = journal.changed_rooms(alice(), 6);
 	let stale = journal.changed_rooms(alice(), 4);
 
-	assert!(!journal.audit(JournalKind::Timeline, room(), held.as_ref()));
-	assert!(!journal.audit(JournalKind::Timeline, room(), stale.as_ref()));
+	assert!(!journal.audit(JournalKind::Timeline, room(), alice(), 6, held.as_ref()));
+	assert!(!journal.audit(JournalKind::Timeline, room(), alice(), 4, stale.as_ref()));
+	assert!(!journal.audit(JournalKind::Timeline, other_room(), alice(), 4, stale.as_ref()));
 	assert_eq!(
 		registry
 			.sync
@@ -148,13 +149,40 @@ fn a_miss_is_counted_only_when_the_journal_answers_no() {
 		0
 	);
 
-	assert!(journal.audit(JournalKind::Typing, other_room(), held.as_ref()));
+	assert!(journal.audit(JournalKind::Typing, other_room(), alice(), 6, held.as_ref()));
 	assert_eq!(registry.sync.journal_missed(JournalKind::Typing), 1);
 	assert_eq!(
 		registry
 			.sync
 			.journal_missed(JournalKind::Timeline),
 		0
+	);
+}
+
+#[test]
+fn a_room_changed_after_the_snapshot_is_no_miss() {
+	let (journal, metrics) = journal(10, 0);
+	let registry = metrics.enable_prometheus();
+
+	let snapshot = journal.changed_rooms(alice(), 1);
+
+	journal.record(2, room(), None);
+	journal.record(3, other_room(), Some(bob()));
+
+	assert!(!journal.audit(JournalKind::Timeline, room(), alice(), 1, snapshot.as_ref()));
+	assert_eq!(
+		registry
+			.sync
+			.journal_missed(JournalKind::Timeline),
+		0
+	);
+
+	assert!(journal.audit(JournalKind::Timeline, other_room(), alice(), 1, snapshot.as_ref()));
+	assert_eq!(
+		registry
+			.sync
+			.journal_missed(JournalKind::Timeline),
+		1
 	);
 }
 

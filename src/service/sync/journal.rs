@@ -125,18 +125,60 @@ impl Journal {
 		Some(rooms)
 	}
 
-	/// Counts a miss of `kind` when `changed`, the answer of
-	/// [`Self::changed_rooms`], holds no change for a room that the fast path
-	/// found changed, and returns whether it did.
+	/// Returns whether `room` changed for `user` after `since`, with no upper
+	/// bound, or `None` when the journal cannot say: it is off, or `since`
+	/// lies below its horizon.
 	///
-	/// A journal that cannot answer is no miss.
+	/// One pass over the entries after `since` under the lock, for the rare
+	/// room a snapshot of [`Self::changed_rooms`] does not hold.
+	#[must_use]
+	pub fn changed_since(&self, room: &RoomId, user: &UserId, since: u64) -> Option<bool> {
+		if self.capacity == 0 {
+			return None;
+		}
+
+		let state = self.lock();
+
+		if since < state.horizon {
+			return None;
+		}
+
+		let changed = state
+			.entries
+			.range((Excluded(since), Unbounded))
+			.flat_map(|(_, changes)| changes)
+			.any(|change| {
+				change.room == room
+					&& change
+						.user
+						.as_deref()
+						.is_none_or(|owner| owner == user)
+			});
+
+		Some(changed)
+	}
+
+	/// Counts a miss of `kind` for a room that the fast path found changed
+	/// and the journal holds no change for, and returns whether it did.
+	///
+	/// `snapshot` is an answer of [`Self::changed_rooms`] taken earlier, and a
+	/// room it holds is no miss. A room it lacks may have changed after the
+	/// snapshot was taken, so the journal is asked once more for that room
+	/// alone, and only a live answer of no change is a miss. A journal that
+	/// cannot answer is no miss.
 	pub fn audit(
 		&self,
 		kind: JournalKind,
 		room: &RoomId,
-		changed: Option<&HashSet<OwnedRoomId>>,
+		user: &UserId,
+		since: u64,
+		snapshot: Option<&HashSet<OwnedRoomId>>,
 	) -> bool {
-		if changed.is_none_or(|rooms| rooms.contains(room)) {
+		if snapshot.is_none_or(|rooms| rooms.contains(room)) {
+			return false;
+		}
+
+		if self.changed_since(room, user, since) != Some(false) {
 			return false;
 		}
 
