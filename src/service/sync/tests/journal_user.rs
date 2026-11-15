@@ -5,11 +5,15 @@ use ruma::{
 	encryption::OneTimeKey,
 	events::{RoomAccountDataEventType, room::member::MembershipState},
 	room_id,
-	serde::Raw,
+	serde::{Base64, Raw, base64::Standard},
+	signatures::{Ed25519KeyPair, KeyPair, to_canonical_json_string_for_signing},
 	user_id,
 };
-use serde_json::{from_value, json};
-use tuwunel_core::{Result, config::Figment, metrics::prom::JournalKind};
+use serde_json::{Value, from_value, json};
+use tuwunel_core::{
+	Result, config::Figment, metrics::prom::JournalKind, utils::to_canonical_object,
+};
+use tuwunel_database::{Json, serialize_key};
 
 use super::super::{RoomMemo, Scan};
 use crate::{
@@ -176,6 +180,92 @@ async fn claiming_a_one_time_key_journals_its_owner() -> Result {
 }
 
 #[tokio::test]
+async fn one_upload_of_several_keys_journals_once_under_the_last_key() -> Result {
+	with_services(async |services| {
+		let users = &services.users;
+		let key: Raw<OneTimeKey> = from_value(json!("key"))?;
+		let keys = ["AAAAAQ", "AAAAAg", "AAAAAw"]
+			.into_iter()
+			.map(|name| {
+				<&OneTimeKeyId>::try_from(format!("signed_curve25519:{name}").as_str())
+					.map(|id| (id.to_owned(), key.clone()))
+			})
+			.collect::<Result<_, _>>()?;
+
+		create_devices(users, alice(), &[laptop()]).await?;
+
+		let after = services.globals.wait_pending().await?;
+		let held = services.sync.journal.len();
+
+		users
+			.add_one_time_keys(alice(), laptop(), &keys, 10)
+			.await?;
+
+		let last = services.globals.wait_pending().await?;
+
+		assert_eq!(last, after.saturating_add(3));
+		assert_eq!(services.sync.journal.len(), held.saturating_add(1));
+		assert_eq!(
+			scan(services, alice(), Some(laptop()), (after, last.saturating_sub(1))),
+			Scan::Quiet
+		);
+		assert_eq!(
+			scan(services, alice(), Some(laptop()), (last.saturating_sub(1), last)),
+			Scan::Wake(JournalKind::OneTimeKeys)
+		);
+		assert_eq!(
+			scan(services, alice(), Some(laptop()), (after, last)),
+			Scan::Wake(JournalKind::OneTimeKeys)
+		);
+
+		Ok(())
+	})
+	.await
+}
+
+#[tokio::test]
+async fn signing_the_key_of_another_user_journals_the_signer() -> Result {
+	with_services(async |services| {
+		let keyid_key = &services.db["keyid_key"];
+		let signer = key_pair("SIGNER");
+		let master = key_pair("MASTER");
+		let (signer_key, master_key) = (public_key(&signer), public_key(&master));
+		let signer_row = (alice(), signer_key.as_str());
+		let master_row = (bob(), master_key.as_str());
+		let master_json = cross_signing_key(bob(), "master", &master_key);
+
+		keyid_key.put(signer_row, Json(cross_signing_key(alice(), "user_signing", &signer_key)));
+		keyid_key.put(master_row, Json(&master_json));
+		services.db["userid_usersigningkeyid"].insert(alice(), serialize_key(signer_row)?);
+		services.db["userid_masterkeyid"].insert(bob(), serialize_key(master_row)?);
+
+		let canonical =
+			to_canonical_json_string_for_signing(&to_canonical_object(&master_json)?)?;
+		let signature = signer.sign(canonical.as_bytes()).base64();
+		let signatures = [(format!("ed25519:{signer_key}"), signature)].into();
+		let after = services.globals.wait_pending().await?;
+		let held = services.sync.journal.len();
+
+		services
+			.users
+			.sign_key(bob(), &master_key, signatures, alice())
+			.await?;
+
+		let upto = services.globals.wait_pending().await?;
+
+		assert_eq!(services.sync.journal.len(), held.saturating_add(1));
+		assert_eq!(
+			scan(services, alice(), None, (after, upto)),
+			Scan::Wake(JournalKind::OwnKeys)
+		);
+		assert_eq!(scan(services, bob(), None, (after, upto)), Scan::Quiet);
+
+		Ok(())
+	})
+	.await
+}
+
+#[tokio::test]
 async fn a_change_of_remote_keys_journals_only_the_device_lists_of_its_rooms() -> Result {
 	with_services(async |services| {
 		let count = services.globals.next_count();
@@ -273,4 +363,22 @@ where
 	};
 
 	test(&fixture.services).await
+}
+
+fn key_pair(version: &str) -> Ed25519KeyPair {
+	Ed25519KeyPair::from_der(&Ed25519KeyPair::generate(), version.into())
+		.expect("generated key pair should parse")
+}
+
+fn public_key(key_pair: &Ed25519KeyPair) -> String {
+	Base64::<Standard, _>::new(key_pair.public_key()).encode()
+}
+
+fn cross_signing_key(user_id: &UserId, usage: &str, public_key: &str) -> Value {
+	json!({
+		"user_id": user_id,
+		"usage": [usage],
+		"keys": { format!("ed25519:{public_key}"): public_key },
+		"signatures": {},
+	})
 }

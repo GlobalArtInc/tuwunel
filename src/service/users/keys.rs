@@ -801,6 +801,13 @@ pub async fn sign_key(
 	} else {
 		let count = self.services.globals.next_count();
 
+		if self.services.globals.user_is_local(sender_id) {
+			self.services
+				.sync
+				.journal
+				.record_user(*count, JournalKind::OwnKeys, sender_id, None);
+		}
+
 		self.db
 			.keychangeid_userid
 			.put_raw((sender_id, *count), target_id);

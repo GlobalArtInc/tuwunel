@@ -170,8 +170,11 @@ build looked at, so they fall on the `candidates` path. `tuwunel_sync_candidates
 rooms did not hold. It should stay at zero; a nonzero value means a change that neither
 the journal nor typing names, and the response still comes from the full walk.
 
-The sync journal is a bounded in-memory log of the rooms that changed, filled by
-every write the fast path probe looks at. The probe asks the journal about each room
+The sync journal is a bounded in-memory log of the changes the sync endpoints report:
+the rooms that changed, and the changes of one user that belong to no room, such as
+membership, profile, global account data, key changes, one-time key counts and
+to-device messages. It is filled by every write the fast path probe and the wait on the
+journal look at. The probe asks the journal about each room
 it finds busy or with a device-key change, and the answers to clients depend on it
 only when `candidates` is on. The journal is written whether or not
 `fastpath` is on. `tuwunel_sync_journal_entries` is the number of changes held and
@@ -183,7 +186,9 @@ several rooms counts once per room, and nothing counts when `journal_capacity` i
 `tuwunel_sync_journal_misses_total`
 counts rooms the probe found changed that the journal held no change for, by `kind`:
 `timeline`, `typing`, `private_read`, `account_data`, `receipts`, `notifications`
-or `device_lists`. It should stay at zero; a nonzero value means a write the
+or `device_lists`. The series for `membership`, `profile`, `global_account_data`,
+`own_keys`, `one_time_keys` and `to_device` exist but stay at zero, since the probe
+does not check those kinds. It should stay at zero; a nonzero value means a write the
 journal does not record. A room a build's snapshot of the journal lacks is asked
 about again before it counts, since it may have changed after the snapshot. Rooms
 asked about a `since` older than the journal covers are not counted.
