@@ -111,6 +111,7 @@ shares the `_other` series.
 | `tuwunel_sync_candidates_misses_total` | counter | none |
 | `tuwunel_sync_journal_entries` | gauge | none |
 | `tuwunel_sync_journal_evictions_total` | counter | none |
+| `tuwunel_sync_journal_recorded_total` | counter | `kind` |
 | `tuwunel_sync_journal_misses_total` | counter | `kind` |
 | `tuwunel_sync_v5_pass_seconds` | histogram | `pass` |
 | `tuwunel_sync_v5_response_rooms` | histogram | none |
@@ -173,7 +174,11 @@ it finds busy or with a device-key change, and the answers to clients depend on 
 only when `candidates` is on. The journal is written whether or not
 `fastpath` is on. `tuwunel_sync_journal_entries` is the number of changes held and
 stays at zero when `journal_capacity` is 0. `tuwunel_sync_journal_evictions_total`
-counts changes dropped to stay within the capacity. `tuwunel_sync_journal_misses_total`
+counts changes dropped to stay within the capacity. `tuwunel_sync_journal_recorded_total`
+counts changes stored, by `kind`: the seven kinds below and `membership`, `profile`,
+`global_account_data`, `own_keys`, `one_time_keys` and `to_device`; a write that touches
+several rooms counts once per room, and nothing counts when `journal_capacity` is 0.
+`tuwunel_sync_journal_misses_total`
 counts rooms the probe found changed that the journal held no change for, by `kind`:
 `timeline`, `typing`, `private_read`, `account_data`, `receipts`, `notifications`
 or `device_lists`. It should stay at zero; a nonzero value means a write the

@@ -20,6 +20,7 @@ use ruma::{
 };
 use tuwunel_core::{
 	Result, debug_warn, err, error, implement,
+	metrics::prom::JournalKind,
 	smallvec::SmallVec,
 	utils::{
 		OptionExt,
@@ -626,7 +627,7 @@ fn append_pdu_json(&self, pdu_id: &RawPduId, pdu: &PduEvent, json: &CanonicalJso
 		self.services
 			.sync
 			.journal
-			.record(count, pdu.room_id(), None);
+			.record(count, JournalKind::Timeline, pdu.room_id(), None);
 	}
 
 	let mut txn = self.db.db.txn();

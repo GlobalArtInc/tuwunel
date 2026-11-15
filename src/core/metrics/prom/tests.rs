@@ -832,11 +832,17 @@ fn sync_journal_is_counted_per_kind_and_its_size_is_a_gauge() {
 	group.set_journal_entries(25);
 	group.journal_evicted(15);
 	group.journal_evicted(3);
+	group.journal_recorded(JournalKind::Membership);
+	group.journal_recorded(JournalKind::Membership);
+	group.journal_recorded(JournalKind::ToDevice);
 	group.journal_miss(JournalKind::PrivateRead);
 	group.journal_miss(JournalKind::DeviceLists);
 
 	assert_eq!(group.journal_held(), 25);
 	assert_eq!(group.journal_evicted_total(), 18);
+	assert_eq!(group.journal_recorded_total(JournalKind::Membership), 2);
+	assert_eq!(group.journal_recorded_total(JournalKind::ToDevice), 1);
+	assert_eq!(group.journal_recorded_total(JournalKind::Timeline), 0);
 	assert_eq!(group.journal_missed(JournalKind::PrivateRead), 1);
 	assert_eq!(group.journal_missed(JournalKind::DeviceLists), 1);
 	assert_eq!(group.journal_missed(JournalKind::Timeline), 0);
@@ -847,6 +853,9 @@ fn sync_journal_is_counted_per_kind_and_its_size_is_a_gauge() {
 	for line in [
 		"tuwunel_sync_journal_entries 25\n",
 		"tuwunel_sync_journal_evictions_total 18\n",
+		"tuwunel_sync_journal_recorded_total{kind=\"membership\"} 2\n",
+		"tuwunel_sync_journal_recorded_total{kind=\"to_device\"} 1\n",
+		"tuwunel_sync_journal_recorded_total{kind=\"timeline\"} 0\n",
 		"tuwunel_sync_journal_misses_total{kind=\"private_read\"} 1\n",
 		"tuwunel_sync_journal_misses_total{kind=\"device_lists\"} 1\n",
 		"tuwunel_sync_journal_misses_total{kind=\"timeline\"} 0\n",

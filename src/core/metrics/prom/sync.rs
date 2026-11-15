@@ -164,7 +164,8 @@ label_set! {
 }
 
 label_set! {
-	/// The fast path finding that the change journal failed to account for.
+	/// A kind of change the sync journal records, and the kind of a write the
+	/// fast path found that the journal failed to account for.
 	pub enum JournalKind("kind") {
 		/// A new event was in the timeline.
 		Timeline => "timeline",
@@ -180,6 +181,18 @@ label_set! {
 		Notifications => "notifications",
 		/// A user's device keys changed in the room.
 		DeviceLists => "device_lists",
+		/// A local user's membership in a room changed.
+		Membership => "membership",
+		/// A user's profile changed.
+		Profile => "profile",
+		/// Account data outside any room changed.
+		GlobalAccountData => "global_account_data",
+		/// A user's own device keys changed.
+		OwnKeys => "own_keys",
+		/// A user's one-time key counts changed.
+		OneTimeKeys => "one_time_keys",
+		/// A to-device event arrived for a device.
+		ToDevice => "to_device",
 	}
 }
 
@@ -201,6 +214,7 @@ pub struct SyncMetrics {
 	candidates_misses: Counter,
 	journal_entries: Gauge,
 	journal_evictions: Counter,
+	journal_records: EnumFamily<JournalKind, Counter>,
 	journal_misses: EnumFamily<JournalKind, Counter>,
 	long_polls: EnumFamily<Api, Gauge>,
 	v5_pass: EnumFamily<Pass, Histogram<15>>,
@@ -240,6 +254,7 @@ impl SyncMetrics {
 			candidates_misses: Counter::new(),
 			journal_entries: Gauge::new(),
 			journal_evictions: Counter::new(),
+			journal_records: EnumFamily::new(Counter::new),
 			journal_misses: EnumFamily::new(Counter::new),
 			long_polls: EnumFamily::new(Gauge::new),
 			v5_pass: EnumFamily::new(|| Histogram::seconds(&SECONDS)),
@@ -335,6 +350,10 @@ impl SyncMetrics {
 	#[inline]
 	/// Counts changes the sync journal dropped to stay within its capacity.
 	pub fn journal_evicted(&self, entries: u64) { self.journal_evictions.add(entries); }
+
+	#[inline]
+	/// Counts one change of `kind` stored in the sync journal.
+	pub fn journal_recorded(&self, kind: JournalKind) { self.journal_records.get(kind).inc(); }
 
 	#[inline]
 	/// Counts a room where the fast path found a change that the sync journal
@@ -455,6 +474,12 @@ impl SyncMetrics {
 	pub fn journal_evicted_total(&self) -> u64 { self.journal_evictions.get() }
 
 	#[must_use]
+	/// Returns the number of changes stored in the sync journal for a kind.
+	pub fn journal_recorded_total(&self, kind: JournalKind) -> u64 {
+		self.journal_records.get(kind).get()
+	}
+
+	#[must_use]
 	/// Returns the number of journal misses counted for a kind.
 	pub fn journal_missed(&self, kind: JournalKind) -> u64 { self.journal_misses.get(kind).get() }
 
@@ -571,6 +596,11 @@ impl SyncMetrics {
 			&self.journal_evictions,
 		);
 		w.metric(
+			"tuwunel_sync_journal_recorded_total",
+			"Changes stored in the sync journal, by kind, one per room of a write.",
+			&self.journal_records,
+		);
+		w.metric(
 			"tuwunel_sync_journal_misses_total",
 			"Rooms where the fast path found a change that the sync journal did not hold, by \
 			 verdict; any count above zero means a write the journal does not record.",
@@ -647,6 +677,7 @@ impl SyncMetrics {
 			self.candidates_misses.series(),
 			self.journal_entries.series(),
 			self.journal_evictions.series(),
+			self.journal_records.series(),
 			self.journal_misses.series(),
 			self.long_polls.series(),
 			self.v5_pass.series(),

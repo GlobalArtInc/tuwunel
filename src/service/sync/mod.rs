@@ -31,8 +31,8 @@ use tuwunel_core::{
 };
 use tuwunel_database::{Cbor, Deserialized, Map, serialize_val};
 
-pub use self::journal::Journal;
 use self::journal::counter_at_start;
+pub use self::journal::{Journal, RoomMemo, Scan};
 use crate::rooms::short::ShortStateHash;
 
 pub struct Service {

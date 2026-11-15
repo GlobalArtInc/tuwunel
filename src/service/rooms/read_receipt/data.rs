@@ -12,6 +12,7 @@ use ruma::{
 use serde::{Deserialize, de::IgnoredAny};
 use tuwunel_core::{
 	Result, error,
+	metrics::prom::JournalKind,
 	result::NotFound,
 	smallvec::SmallVec,
 	trace,
@@ -138,7 +139,7 @@ impl Data {
 		self.services
 			.sync
 			.journal
-			.record(*count, room_id, None);
+			.record(*count, JournalKind::Receipts, room_id, None);
 
 		let mut txn = superseded
 			.iter()
@@ -298,10 +299,12 @@ impl Data {
 		let ts = u64::from(ts.get());
 
 		if let Some(next_count) = next_count.as_deref() {
-			self.services
-				.sync
-				.journal
-				.record(*next_count, room_id, Some(user_id));
+			self.services.sync.journal.record(
+				*next_count,
+				JournalKind::PrivateRead,
+				room_id,
+				Some(user_id),
+			);
 
 			txn.put(&self.roomuserid_lastprivatereadupdate, (room_id, user_id), *next_count);
 			txn.put(&self.roomuserid_privatereadsync, (room_id, user_id), *next_count);

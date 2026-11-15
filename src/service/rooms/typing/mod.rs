@@ -19,7 +19,9 @@ use tokio::sync::{
 use tuwunel_core::{
 	Result, Server,
 	debug::INFO_SPAN_LEVEL,
-	debug_info, trace,
+	debug_info,
+	metrics::prom::JournalKind,
+	trace,
 	utils::{BoolExt, IterStream, millis_since_unix_epoch},
 };
 
@@ -80,7 +82,7 @@ impl Service {
 		self.services
 			.sync
 			.journal
-			.record(*count, room_id, None);
+			.record(*count, JournalKind::Typing, room_id, None);
 
 		room.update = *count;
 
@@ -134,7 +136,7 @@ impl Service {
 		self.services
 			.sync
 			.journal
-			.record(*count, room_id, None);
+			.record(*count, JournalKind::Typing, room_id, None);
 
 		room.update = *count;
 
@@ -251,7 +253,7 @@ impl Service {
 		self.services
 			.sync
 			.journal
-			.record(*count, room_id, None);
+			.record(*count, JournalKind::Typing, room_id, None);
 
 		room.update = *count;
 

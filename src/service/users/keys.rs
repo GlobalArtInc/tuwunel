@@ -21,6 +21,7 @@ use tuwunel_core::{
 	debug::INFO_SPAN_LEVEL,
 	debug_error, debug_warn, err, implement,
 	itertools::Itertools,
+	metrics::prom::JournalKind,
 	smallvec::SmallVec,
 	utils::{
 		BoolExt, IterStream, ReadyExt,
@@ -1192,7 +1193,7 @@ pub async fn mark_device_key_update(
 			self.services
 				.sync
 				.journal
-				.record(*count, room_id, None);
+				.record(*count, JournalKind::DeviceLists, room_id, None);
 
 			let room_key = (room_id, *count);
 			self.db

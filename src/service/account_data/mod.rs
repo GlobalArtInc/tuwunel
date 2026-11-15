@@ -25,6 +25,7 @@ use serde::Deserialize;
 use serde_json::json;
 use tuwunel_core::{
 	Err, Result, at, err, implement,
+	metrics::prom::JournalKind,
 	utils::{MutexMap, ReadyExt, TryReadyExt, result::LogErr, stream::TryIgnore},
 };
 use tuwunel_database::{Deserialized, Handle, Ignore, Interfix, Json, Map};
@@ -134,10 +135,12 @@ pub async fn update(
 	let roomuserdataid = (room_id, user_id, *count, &event_type);
 
 	if let Some(room_id) = room_id {
-		self.services
-			.sync
-			.journal
-			.record(*count, room_id, Some(user_id));
+		self.services.sync.journal.record(
+			*count,
+			JournalKind::AccountData,
+			room_id,
+			Some(user_id),
+		);
 	}
 
 	let mut txn = self.services.db.txn();

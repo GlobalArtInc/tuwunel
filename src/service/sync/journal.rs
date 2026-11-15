@@ -1,10 +1,10 @@
 use std::{
-	collections::{BTreeMap, HashSet},
-	ops::Bound::{Excluded, Unbounded},
-	sync::{Arc, Mutex, MutexGuard, PoisonError},
+	collections::{BTreeMap, HashMap, HashSet},
+	ops::Bound::{Excluded, Included, Unbounded},
+	sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 
-use ruma::{OwnedRoomId, OwnedUserId, RoomId, UserId};
+use ruma::{DeviceId, OwnedDeviceId, OwnedRoomId, OwnedUserId, RoomId, UserId};
 use tuwunel_core::{
 	Result,
 	metrics::{Metrics, prom::JournalKind},
@@ -16,8 +16,8 @@ use tuwunel_database::Map;
 
 use crate::globals::Data;
 
-/// A bounded in-memory log of the rooms that changed, keyed by the global
-/// sequence number of the write.
+/// A bounded in-memory log of the changes the sync endpoints report, keyed by
+/// the global sequence number of the write.
 ///
 /// Every writer of a stream the sync fast path probe reads records its number
 /// here under the permit that holds it and before the write reaches the
@@ -25,11 +25,12 @@ use crate::globals::Data;
 /// for numbers above its horizon: it starts at the counter the server started
 /// from and rises when the oldest entries are dropped to stay within capacity.
 /// The lock is held only for the in-memory work of one call, never across an
-/// await and never while calling another service.
+/// await and never while calling another service; calls that only read share
+/// it.
 pub struct Journal {
 	metrics: Arc<Metrics>,
 	capacity: usize,
-	state: Mutex<State>,
+	state: RwLock<State>,
 }
 
 #[derive(Default)]
@@ -42,8 +43,55 @@ struct State {
 type Changes = SmallVec<[Change; 1]>;
 
 struct Change {
-	room: OwnedRoomId,
+	kind: JournalKind,
+	room: Option<OwnedRoomId>,
 	user: Option<OwnedUserId>,
+	device: Option<OwnedDeviceId>,
+}
+
+/// Which rooms one wait has found the user to be in.
+///
+/// A room maps to whether the user is in it, and a room the memo lacks is
+/// unknown, unless the memo is complete, which means every room the user is in
+/// is in the memo.
+#[derive(Debug, Default)]
+pub struct RoomMemo {
+	rooms: HashMap<OwnedRoomId, bool>,
+	complete: bool,
+}
+
+/// The verdict of [`Journal::scan`] on a window of changes.
+#[derive(Debug, Eq, PartialEq)]
+pub enum Scan {
+	/// A change in the window concerns the user, of this kind.
+	Wake(JournalKind),
+	/// The window holds changes of rooms the memo does not know. The caller
+	/// records whether the user is in each room, or fills the memo with all of
+	/// them when `overflow` is set, and scans the same window again. With
+	/// `overflow` the rooms are only those found before the limit was passed.
+	Resolve {
+		rooms: Vec<OwnedRoomId>,
+		overflow: bool,
+	},
+	/// No change in the window concerns the user.
+	Quiet,
+	/// The journal no longer covers the start of the window; it is complete
+	/// from this sequence number.
+	Horizon(u64),
+}
+
+impl RoomMemo {
+	/// Returns whether the user is in `room`, or `None` when the memo does not
+	/// know.
+	#[must_use]
+	pub fn get(&self, room: &RoomId) -> Option<bool> { self.rooms.get(room).copied() }
+
+	/// Notes whether the user is in `room`.
+	pub fn insert(&mut self, room: OwnedRoomId, joined: bool) { self.rooms.insert(room, joined); }
+
+	/// Notes that the memo holds every room the user is in, so a room it lacks
+	/// is one the user is not in.
+	pub fn mark_complete(&mut self) { self.complete = true; }
 }
 
 impl Journal {
@@ -53,23 +101,46 @@ impl Journal {
 		Self {
 			metrics,
 			capacity,
-			state: Mutex::new(State { horizon, ..State::default() }),
+			state: RwLock::new(State { horizon, ..State::default() }),
 		}
 	}
 
 	/// Notes that the write numbered `count` changed `room`, for every user
 	/// when `user` is `None` and for that user alone otherwise.
-	pub fn record(&self, count: u64, room: &RoomId, user: Option<&UserId>) {
+	pub fn record(&self, count: u64, kind: JournalKind, room: &RoomId, user: Option<&UserId>) {
+		self.insert(count, Change {
+			kind,
+			room: Some(room.to_owned()),
+			user: user.map(ToOwned::to_owned),
+			device: None,
+		});
+	}
+
+	/// Notes that the write numbered `count` changed something of `user` that
+	/// belongs to no room, for the one `device` when it is given and for every
+	/// device of the user otherwise.
+	pub fn record_user(
+		&self,
+		count: u64,
+		kind: JournalKind,
+		user: &UserId,
+		device: Option<&DeviceId>,
+	) {
+		self.insert(count, Change {
+			kind,
+			room: None,
+			user: Some(user.to_owned()),
+			device: device.map(ToOwned::to_owned),
+		});
+	}
+
+	fn insert(&self, count: u64, change: Change) {
 		if self.capacity == 0 {
 			return;
 		}
 
-		let change = Change {
-			room: room.to_owned(),
-			user: user.map(ToOwned::to_owned),
-		};
-
-		let mut state = self.lock();
+		let kind = change.kind;
+		let mut state = self.write();
 
 		state
 			.entries
@@ -81,6 +152,7 @@ impl Journal {
 		let evicted = state.evict(self.capacity);
 
 		if let Some(registry) = self.metrics.prometheus() {
+			registry.sync.journal_recorded(kind);
 			registry
 				.sync
 				.set_journal_entries(to_u64(state.len));
@@ -103,7 +175,7 @@ impl Journal {
 			return None;
 		}
 
-		let state = self.lock();
+		let state = self.read();
 
 		if since < state.horizon {
 			return None;
@@ -113,13 +185,14 @@ impl Journal {
 			.entries
 			.range((Excluded(since), Unbounded))
 			.flat_map(|(_, changes)| changes)
+			.filter(|change| is_room_kind(change.kind))
 			.filter(|change| {
 				change
 					.user
 					.as_deref()
 					.is_none_or(|owner| owner == user)
 			})
-			.map(|change| change.room.clone())
+			.filter_map(|change| change.room.clone())
 			.collect();
 
 		Some(rooms)
@@ -137,7 +210,7 @@ impl Journal {
 			return None;
 		}
 
-		let state = self.lock();
+		let state = self.read();
 
 		if since < state.horizon {
 			return None;
@@ -148,7 +221,8 @@ impl Journal {
 			.range((Excluded(since), Unbounded))
 			.flat_map(|(_, changes)| changes)
 			.any(|change| {
-				change.room == room
+				is_room_kind(change.kind)
+					&& change.room.as_deref() == Some(room)
 					&& change
 						.user
 						.as_deref()
@@ -189,21 +263,110 @@ impl Journal {
 		true
 	}
 
+	/// Looks at the changes numbered in `(after, upto]`, in order, for one that
+	/// concerns `user` on `device`, and returns the verdict.
+	///
+	/// A change of `user` wakes unless it names another device. A change of a
+	/// room with no user wakes when `memo` says the user is in the room, is
+	/// passed over when it says the user is not, and when it does not know, is
+	/// passed over if `memo` is complete and otherwise left for the caller to
+	/// find out, up to `limit` rooms. The first wake ends the scan. A `since`
+	/// below the horizon is answered with the horizon, before any change is
+	/// looked at.
+	///
+	/// A journal that is off records nothing, so a scan of it would find every
+	/// window quiet; the caller does not scan a journal whose capacity is 0.
+	///
+	/// One pass under the shared lock, over the entries of the window only.
+	#[must_use]
+	pub fn scan(
+		&self,
+		user: &UserId,
+		device: Option<&DeviceId>,
+		after: u64,
+		upto: u64,
+		memo: &RoomMemo,
+		limit: usize,
+	) -> Scan {
+		let state = self.read();
+
+		if after < state.horizon {
+			return Scan::Horizon(state.horizon);
+		}
+
+		if after >= upto {
+			return Scan::Quiet;
+		}
+
+		let mut unknown: Vec<OwnedRoomId> = Vec::new();
+		let mut seen: HashSet<&RoomId> = HashSet::new();
+
+		let window = state
+			.entries
+			.range((Excluded(after), Included(upto)))
+			.flat_map(|(_, changes)| changes);
+
+		for change in window {
+			if let Some(owner) = change.user.as_deref() {
+				let other_device = change
+					.device
+					.as_deref()
+					.is_some_and(|target| Some(target) != device);
+
+				if owner == user && !other_device {
+					return Scan::Wake(change.kind);
+				}
+
+				continue;
+			}
+
+			let Some(room) = change.room.as_deref() else {
+				continue;
+			};
+
+			match memo.get(room) {
+				| Some(true) => return Scan::Wake(change.kind),
+				| Some(false) => {},
+				| None if memo.complete => {},
+				| None =>
+					if seen.insert(room) {
+						unknown.push(room.to_owned());
+
+						if unknown.len() > limit {
+							return Scan::Resolve { rooms: unknown, overflow: true };
+						}
+					},
+			}
+		}
+
+		if unknown.is_empty() {
+			Scan::Quiet
+		} else {
+			Scan::Resolve { rooms: unknown, overflow: false }
+		}
+	}
+
 	/// Returns the sequence number from which the journal is complete.
 	#[must_use]
-	pub fn horizon(&self) -> u64 { self.lock().horizon }
+	pub fn horizon(&self) -> u64 { self.read().horizon }
 
 	/// Returns the number of changes held.
 	#[must_use]
-	pub fn len(&self) -> usize { self.lock().len }
+	pub fn len(&self) -> usize { self.read().len }
 
 	/// Returns whether the journal holds no change.
 	#[must_use]
 	pub fn is_empty(&self) -> bool { self.len() == 0 }
 
-	fn lock(&self) -> MutexGuard<'_, State> {
+	fn read(&self) -> RwLockReadGuard<'_, State> {
 		self.state
-			.lock()
+			.read()
+			.unwrap_or_else(PoisonError::into_inner)
+	}
+
+	fn write(&self) -> RwLockWriteGuard<'_, State> {
+		self.state
+			.write()
 			.unwrap_or_else(PoisonError::into_inner)
 	}
 }
@@ -241,6 +404,24 @@ pub(super) fn counter_at_start(global: &Map) -> Result<u64> {
 		.optional()?
 		.as_deref()
 		.map_or(Ok(0), u64_from_bytes)
+}
+
+fn is_room_kind(kind: JournalKind) -> bool {
+	match kind {
+		| JournalKind::Timeline
+		| JournalKind::Typing
+		| JournalKind::PrivateRead
+		| JournalKind::AccountData
+		| JournalKind::Receipts
+		| JournalKind::Notifications
+		| JournalKind::DeviceLists => true,
+		| JournalKind::Membership
+		| JournalKind::Profile
+		| JournalKind::GlobalAccountData
+		| JournalKind::OwnKeys
+		| JournalKind::OneTimeKeys
+		| JournalKind::ToDevice => false,
+	}
 }
 
 fn to_u64(len: usize) -> u64 { u64::try_from(len).unwrap_or(u64::MAX) }

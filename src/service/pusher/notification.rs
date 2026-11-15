@@ -4,7 +4,9 @@ use futures::{StreamExt, future::join3, stream::select};
 use ruma::{EventId, OwnedEventId, RoomId, UserId, events::receipt::ReceiptThread};
 use serde::Serialize;
 use tuwunel_core::{
-	Error, Result, implement, trace,
+	Error, Result, implement,
+	metrics::prom::JournalKind,
+	trace,
 	utils::{
 		bytes::{escape_bytes, u64_from_bytes},
 		stream::{BroadbandExt, ReadyExt, TryIgnore},
@@ -37,7 +39,7 @@ pub async fn reset_notification_counts(&self, user_id: &UserId, room_id: &RoomId
 	self.services
 		.sync
 		.journal
-		.record(*count, room_id, Some(user_id));
+		.record(*count, JournalKind::Notifications, room_id, Some(user_id));
 
 	let userroom_id = (user_id, room_id);
 
@@ -92,7 +94,7 @@ pub async fn reset_thread_notification_counts(
 	self.services
 		.sync
 		.journal
-		.record(*count, room_id, Some(user_id));
+		.record(*count, JournalKind::Notifications, room_id, Some(user_id));
 
 	let userroom_thread = (user_id, room_id, thread_root);
 
