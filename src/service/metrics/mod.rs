@@ -32,6 +32,7 @@ pub struct Service {
 	userid_password: Arc<Map>,
 	roomid_shortroomid: Arc<Map>,
 	userdeviceid_metadata: Arc<Map>,
+	userdeviceconnid_conn: Arc<Map>,
 	process_failed: AtomicBool,
 	rocksdb_failed: AtomicBool,
 }
@@ -46,6 +47,7 @@ impl crate::Service for Service {
 			userid_password: args.db["userid_password"].clone(),
 			roomid_shortroomid: args.db["roomid_shortroomid"].clone(),
 			userdeviceid_metadata: args.db["userdeviceid_metadata"].clone(),
+			userdeviceconnid_conn: args.db["userdeviceconnid_conn"].clone(),
 			process_failed: AtomicBool::new(false),
 			rocksdb_failed: AtomicBool::new(false),
 		}))

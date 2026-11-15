@@ -369,7 +369,15 @@ pub async fn store_connection(
 		return Ok(());
 	}
 
+	let bytes = state.len();
+
 	self.db.userdeviceconnid_conn.put_raw(key, state);
+
+	if let Some(registry) = self.services.server.metrics.prometheus() {
+		registry
+			.sync
+			.v5_state(u64::try_from(bytes).unwrap_or(u64::MAX));
+	}
 
 	debug!(
 		since = %conn.globalsince,
@@ -378,6 +386,17 @@ pub async fn store_connection(
 	);
 
 	Ok(())
+}
+
+/// Returns how many connections are loaded, or `None` while the cache is
+/// locked by a request, which a reader that must not wait takes as no news.
+#[implement(Service)]
+#[must_use]
+pub fn loaded_connection_count(&self) -> Option<usize> {
+	self.connections
+		.try_lock()
+		.ok()
+		.map(|cache| cache.len())
 }
 
 #[implement(Service)]

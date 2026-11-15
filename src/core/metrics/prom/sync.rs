@@ -1,7 +1,7 @@
 use super::{
 	family::EnumFamily,
 	http::Api,
-	types::{Counter, Gauge, Histogram, Metric, Timer},
+	types::{Counter, Gauge, Histogram, Metric, Seen, Timer},
 	write::Writer,
 };
 use crate::label_set;
@@ -26,6 +26,8 @@ static SECONDS: [u64; 15] = [
 
 static ROOMS: [u64; 15] =
 	[0, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1_000, 2_000, 5_000, 10_000, 20_000];
+
+static STATE_BYTES: [u64; 7] = [1 << 10, 1 << 12, 1 << 14, 1 << 16, 1 << 18, 1 << 20, 1 << 22];
 
 label_set! {
 	/// Whether a sync request starts a stream or continues one.
@@ -76,6 +78,16 @@ label_set! {
 	}
 }
 
+label_set! {
+	/// Which pass of a sliding sync request ran.
+	pub enum Pass("pass") {
+		/// The first pass of the request.
+		First => "first",
+		/// A pass that ran again after the watchers woke the request.
+		Woken => "woken",
+	}
+}
+
 /// Metrics of the sync endpoints.
 pub struct SyncMetrics {
 	v3_build: EnumFamily<SinceKind, Histogram<15>>,
@@ -84,6 +96,13 @@ pub struct SyncMetrics {
 	v3_rooms_per_sync: Histogram<15>,
 	fastpath_mismatches: Counter,
 	long_polls: EnumFamily<Api, Gauge>,
+	v5_pass: EnumFamily<Pass, Histogram<15>>,
+	v5_connections_loaded: Gauge,
+	v5_connections_stored: Seen<Gauge>,
+	v5_state_bytes: Histogram<7>,
+	v5_store_bytes: Seen<Gauge>,
+	v5_response_rooms: Histogram<15>,
+	v5_unknown_pos: Counter,
 }
 
 /// A request waiting for activity, counted in the long-poll gauge until the
@@ -104,6 +123,13 @@ impl SyncMetrics {
 			v3_rooms_per_sync: Histogram::new(&ROOMS),
 			fastpath_mismatches: Counter::new(),
 			long_polls: EnumFamily::new(Gauge::new),
+			v5_pass: EnumFamily::new(|| Histogram::seconds(&SECONDS)),
+			v5_connections_loaded: Gauge::new(),
+			v5_connections_stored: Seen::new(Gauge::new()),
+			v5_state_bytes: Histogram::new(&STATE_BYTES),
+			v5_store_bytes: Seen::new(Gauge::new()),
+			v5_response_rooms: Histogram::new(&ROOMS),
+			v5_unknown_pos: Counter::new(),
 		}
 	}
 
@@ -142,6 +168,41 @@ impl SyncMetrics {
 		LongPoll { gauge }
 	}
 
+	#[inline]
+	/// Starts timing one pass of a sliding sync request; the time is recorded
+	/// when the timer is dropped.
+	pub fn v5_pass(&self, pass: Pass) -> Timer<'_, 15> { self.v5_pass.get(pass).start() }
+
+	#[inline]
+	/// Counts a sliding sync request answered with an unknown position.
+	pub fn v5_unknown_pos(&self) { self.v5_unknown_pos.inc(); }
+
+	#[inline]
+	/// Records the size of a sliding sync connection as it was stored.
+	pub fn v5_state(&self, bytes: u64) { self.v5_state_bytes.observe(bytes); }
+
+	#[inline]
+	/// Records how many rooms one sliding sync response carries.
+	pub fn v5_response_rooms(&self, rooms: u64) { self.v5_response_rooms.observe(rooms); }
+
+	/// Stores the number of sliding sync connections held in memory.
+	pub fn set_v5_connections_loaded(&self, connections: u64) {
+		self.v5_connections_loaded
+			.set_unsigned(connections);
+	}
+
+	/// Stores the number of sliding sync connections kept in the database.
+	pub fn set_v5_connections_stored(&self, connections: u64) {
+		self.v5_connections_stored
+			.touch()
+			.set_unsigned(connections);
+	}
+
+	/// Stores the bytes the database holds for sliding sync connections.
+	pub fn set_v5_store_bytes(&self, bytes: u64) {
+		self.v5_store_bytes.touch().set_unsigned(bytes);
+	}
+
 	#[must_use]
 	/// Returns the number of rooms counted for a verdict.
 	pub fn v3_rooms_counted(&self, fastpath: Fastpath) -> u64 {
@@ -165,6 +226,22 @@ impl SyncMetrics {
 	#[must_use]
 	/// Returns the number of requests waiting for activity on an API.
 	pub fn long_polling(&self, api: Api) -> i64 { self.long_polls.get(api).get() }
+
+	#[must_use]
+	/// Returns the number of sliding sync passes timed.
+	pub fn v5_passes(&self, pass: Pass) -> u64 { self.v5_pass.get(pass).count() }
+
+	#[must_use]
+	/// Returns the number of unknown position answers counted.
+	pub fn v5_unknown_positions(&self) -> u64 { self.v5_unknown_pos.get() }
+
+	#[must_use]
+	/// Returns the number of connection sizes recorded.
+	pub fn v5_states(&self) -> u64 { self.v5_state_bytes.count() }
+
+	#[must_use]
+	/// Returns the number of sliding sync responses recorded by room count.
+	pub fn v5_responses(&self) -> u64 { self.v5_response_rooms.count() }
 
 	pub(super) fn write(&self, w: &mut Writer) {
 		w.metric(
@@ -197,6 +274,50 @@ impl SyncMetrics {
 			"Sync requests waiting for activity, by API version.",
 			&self.long_polls,
 		);
+		w.metric(
+			"tuwunel_sync_v5_pass_seconds",
+			"Time of one pass of a sliding sync request, not counting the wait for activity; \
+			 first is the opening pass, woken a pass after the watchers fired.",
+			&self.v5_pass,
+		);
+		w.metric(
+			"tuwunel_sync_v5_connections_loaded",
+			"Sliding sync connections held in memory.",
+			&self.v5_connections_loaded,
+		);
+
+		if self.v5_connections_stored.is_seen() {
+			w.metric(
+				"tuwunel_sync_v5_connections_stored",
+				"Sliding sync connections kept in the database, counted by a periodic scan.",
+				&self.v5_connections_stored,
+			);
+		}
+
+		w.metric(
+			"tuwunel_sync_v5_connection_state_bytes",
+			"Size of a sliding sync connection as stored after a response.",
+			&self.v5_state_bytes,
+		);
+
+		if self.v5_store_bytes.is_seen() {
+			w.metric(
+				"tuwunel_sync_v5_store_bytes",
+				"Bytes the sliding sync connection column occupies in table files.",
+				&self.v5_store_bytes,
+			);
+		}
+
+		w.metric(
+			"tuwunel_sync_v5_response_rooms",
+			"Rooms in one sliding sync response.",
+			&self.v5_response_rooms,
+		);
+		w.metric(
+			"tuwunel_sync_v5_unknown_pos_total",
+			"Sliding sync requests answered with an unknown position.",
+			&self.v5_unknown_pos,
+		);
 	}
 
 	pub(super) fn series(&self) -> usize {
@@ -207,6 +328,13 @@ impl SyncMetrics {
 			self.v3_rooms_per_sync.series(),
 			self.fastpath_mismatches.series(),
 			self.long_polls.series(),
+			self.v5_pass.series(),
+			self.v5_connections_loaded.series(),
+			self.v5_connections_stored.series(),
+			self.v5_state_bytes.series(),
+			self.v5_store_bytes.series(),
+			self.v5_response_rooms.series(),
+			self.v5_unknown_pos.series(),
 		]
 		.into_iter()
 		.fold(0, usize::saturating_add)

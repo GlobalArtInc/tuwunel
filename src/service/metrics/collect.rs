@@ -38,6 +38,26 @@ pub async fn collect_once(&self) {
 	registry
 		.inventory
 		.set_last_normal_entries(to_u64(self.services.timeline.last_normal_len()));
+
+	if let Some(loaded) = self.services.sync.loaded_connection_count() {
+		registry
+			.sync
+			.set_v5_connections_loaded(to_u64(loaded));
+	}
+
+	self.collect_connection_store(registry).await;
+}
+
+#[implement(Service)]
+async fn collect_connection_store(&self, registry: &Registry) {
+	let db = Arc::clone(&self.db);
+	let size = spawn_blocking(move || db.engine.column_size("userdeviceconnid_conn")).await;
+
+	match size {
+		| Ok(Ok(bytes)) => registry.sync.set_v5_store_bytes(bytes),
+		| Ok(Err(e)) => warn!("The sliding sync store size is unavailable: {e}"),
+		| Err(e) => error!("The sliding sync store sampling task failed: {e}"),
+	}
 }
 
 #[implement(Service)]

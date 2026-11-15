@@ -33,7 +33,7 @@ pub use self::{
 	rocksdb::{CacheSample, Condition, POOL_CAP, RocksSample, Rocksdb},
 	runtime::{Runtime, RuntimeSample},
 	storage::{Op, PROVIDER_CAP, Storage, StoreResult},
-	sync::{Fastpath, LongPoll, Reply, SinceKind, SyncMetrics},
+	sync::{Fastpath, LongPoll, Pass, Reply, SinceKind, SyncMetrics},
 	types::{Counter, Gauge, Histogram, Metric, Seen, Timer},
 	write::{Kind, Le, Scale, Value, Writer, push_label},
 };

@@ -30,6 +30,7 @@ use tuwunel_core::{
 	debug::INFO_SPAN_LEVEL,
 	debug_warn,
 	error::inspect_log,
+	metrics::prom::{Api, Pass},
 	smallvec::SmallVec,
 	trace,
 	utils::{
@@ -54,7 +55,7 @@ use self::{
 	range::collect as collect_ranges,
 	selector::selector,
 };
-use super::{joined_since, share_encrypted_room};
+use super::{joined_since, long_poll, share_encrypted_room};
 use crate::{ClientIp, Ruma, utils::poll_deadline};
 
 #[derive(Copy, Clone)]
@@ -121,6 +122,7 @@ pub(crate) async fn sync_events_v5_route(
 	let sender_user = body.sender_user();
 	let sender_device = body.sender_device.as_deref();
 	let request = &body.body;
+	let registry = services.server.metrics.prometheus();
 
 	if let Some(fields) = request.extensions.profiles.fields.as_deref() {
 		services.profile.check_requested_fields(fields)?;
@@ -163,6 +165,8 @@ pub(crate) async fn sync_events_v5_route(
 	}
 
 	if since != 0 && conn.next_batch == 0 {
+		unknown_position(services);
+
 		return Err!(Request(UnknownPos(warn!("Connection lost; restarting sync stream."))));
 	}
 
@@ -179,6 +183,8 @@ pub(crate) async fn sync_events_v5_route(
 	let advancing = since == conn.next_batch;
 	let retarding = since != 0 && since <= conn.globalsince;
 	if !advancing && !retarding {
+		unknown_position(services);
+
 		return Err!(Request(UnknownPos(warn!(
 			"Requesting unknown or invalid stream position."
 		))));
@@ -227,6 +233,12 @@ pub(crate) async fn sync_events_v5_route(
 			"since should not be greater than next_batch."
 		);
 
+		let pass = registry.map(|registry| {
+			registry
+				.sync
+				.v5_pass(if woken { Pass::Woken } else { Pass::First })
+		});
+
 		let window;
 		let watchers = services
 			.sync
@@ -266,11 +278,17 @@ pub(crate) async fn sync_events_v5_route(
 			response.extensions = extensions.into_response(&response.rooms);
 
 			if !is_empty_response(&mut response, keys_answer) {
+				drop(pass);
+
 				return respond(services, (&conn_key, &conn_val), &conn, response).await;
 			}
 		}
 
+		drop(pass);
+
 		let waiter = async || {
+			let _long_poll = long_poll(services, Api::V5);
+
 			tokio::select! {
 				() = interrupted.notified() => true,
 				watch = timeout_at(stop_at, watchers) => watch.is_err(),
@@ -306,6 +324,12 @@ fn poll_timeout(request: &Request, max: u64) -> u64 {
 		.and_then(millis)
 		.map(|timeout| timeout.min(max))
 		.unwrap_or(0)
+}
+
+fn unknown_position(services: &Services) {
+	if let Some(registry) = services.server.metrics.prometheus() {
+		registry.sync.v5_unknown_pos();
+	}
 }
 
 fn check_profile_selection(services: &Services, request: &Request, conn: &Connection) -> Result {
@@ -386,6 +410,12 @@ async fn respond(
 	};
 
 	trace!(conn.globalsince, conn.next_batch, ?response, "Responding");
+
+	if let Some(registry) = services.server.metrics.prometheus() {
+		registry
+			.sync
+			.v5_response_rooms(u64::try_from(response.rooms.len()).unwrap_or(u64::MAX));
+	}
 
 	services
 		.sync

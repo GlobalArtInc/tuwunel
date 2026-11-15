@@ -37,6 +37,12 @@ pub async fn count_once(&self) {
 		inventory.set_devices(devices);
 	}
 
+	if let Some(connections) = scan("sync connections", &self.userdeviceconnid_conn).await {
+		registry
+			.sync
+			.set_v5_connections_stored(connections);
+	}
+
 	let sending = &self.services.sending;
 	let ids: Vec<String> = self
 		.services

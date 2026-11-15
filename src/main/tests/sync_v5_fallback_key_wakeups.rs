@@ -7,6 +7,7 @@ use serde_json::json;
 use tokio::time::sleep;
 use tuwunel_core::{
 	Result, err,
+	metrics::prom::{Api, Pass, Registry},
 	utils::{BoolExt, future::ExtExt},
 };
 use tuwunel_service::Services;
@@ -22,6 +23,9 @@ mod sliding_sync;
 
 const READER_TOKEN: &str = "sync-v5-fallback-key-wakeups-reader-token";
 const OTHER_TOKEN: &str = "sync-v5-fallback-key-wakeups-other-token";
+
+/// A position far past anything the server issued.
+const UNKNOWN_POS: &str = "4000000000";
 
 /// How long the idle round polls for, in milliseconds.
 ///
@@ -68,6 +72,8 @@ fn fallback_key_types_alone_do_not_end_a_long_poll() -> Result {
 }
 
 async fn exercise(services: &Services, base: &str) -> Result {
+	let registry = services.server.metrics.enable_prometheus();
+
 	register(services, "fallbackreader", READER_TOKEN).await?;
 	register(services, "fallbackother", OTHER_TOKEN).await?;
 
@@ -167,7 +173,37 @@ async fn exercise(services: &Services, base: &str) -> Result {
 		.into_option()
 		.ok_or_else(|| err!("the woken round answered before the reader acted ({waited:?})"))?;
 
-	answered_before_deadline(waited, "the woken round")
+	answered_before_deadline(waited, "the woken round")?;
+
+	let lost = reader
+		.sliding_sync(Some(UNKNOWN_POS), 0, &extension_only)
+		.await;
+
+	lost.err()
+		.ok_or_else(|| err!("an unknown position was answered"))?;
+
+	measured(registry)
+}
+
+/// Fails a run whose passes, long polls and answers the metrics missed.
+fn measured(registry: &Registry) -> Result {
+	let sync = &registry.sync;
+
+	(sync.v5_passes(Pass::First) > 0 && sync.v5_passes(Pass::Woken) > 0)
+		.into_option()
+		.ok_or_else(|| err!("the passes were not counted by kind"))?;
+
+	(sync.v5_states() > 0 && sync.v5_responses() > 0)
+		.into_option()
+		.ok_or_else(|| err!("the responses were not measured"))?;
+
+	(sync.v5_unknown_positions() == 1)
+		.into_option()
+		.ok_or_else(|| err!("the unknown position was not counted once"))?;
+
+	(sync.long_polling(Api::V5) == 0)
+		.into_option()
+		.ok_or_else(|| err!("a long poll was left in the gauge"))
 }
 
 /// Fails a round expected to answer that waited out the deadline instead.

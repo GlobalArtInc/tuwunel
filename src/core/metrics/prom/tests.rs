@@ -5,8 +5,8 @@ use regex::Regex;
 
 use super::{
 	APPSERVICE_CAP, Api, CacheSample, Condition, Counter, DynFamily, EnumFamily, Fastpath, Gauge,
-	Histogram, MAX_KEY_LEN, Metric, OTHER, Op, PROVIDER_CAP, Registry, Reply, RocksSample, Scale,
-	SendResult, SinceKind, Writer,
+	Histogram, MAX_KEY_LEN, Metric, OTHER, Op, PROVIDER_CAP, Pass, Registry, Reply, RocksSample,
+	Scale, SendResult, SinceKind, Writer,
 };
 use crate::label_set;
 
@@ -29,6 +29,7 @@ const ALLOWED_LABELS: &[&str] = &[
 	"since",
 	"outcome",
 	"fastpath",
+	"pass",
 	"appservice",
 	"kind",
 	"result",
@@ -612,6 +613,51 @@ fn sync_v3_is_counted_per_verdict_and_a_long_poll_leaves_with_its_guard() {
 		"tuwunel_sync_v3_rooms_per_sync_bucket{le=\"5\"} 1\n",
 		"tuwunel_sync_fastpath_mismatches_total 1\n",
 		"tuwunel_sync_long_polls{api=\"v3\"} 0\n",
+	] {
+		assert!(text.contains(line), "{line}\n{text}");
+	}
+
+	assert!(parsed.samples <= registry.max_series());
+}
+
+#[test]
+fn sync_v5_is_counted_per_pass_and_stored_readings_wait_for_a_value() {
+	let registry = Registry::new();
+	let group = &registry.sync;
+	let text = registry.render();
+
+	assert!(!text.contains("tuwunel_sync_v5_store_bytes"), "{text}");
+	assert!(!text.contains("tuwunel_sync_v5_connections_stored"), "{text}");
+	assert!(text.contains("tuwunel_sync_v5_connections_loaded 0\n"), "{text}");
+
+	drop(group.v5_pass(Pass::First));
+	drop(group.v5_pass(Pass::Woken));
+	drop(group.v5_pass(Pass::Woken));
+	group.v5_unknown_pos();
+	group.v5_state(5_000);
+	group.v5_response_rooms(0);
+	group.v5_response_rooms(30);
+	group.set_v5_connections_loaded(7);
+	group.set_v5_connections_stored(9);
+	group.set_v5_store_bytes(4_096);
+
+	assert_eq!(group.v5_passes(Pass::First), 1);
+	assert_eq!(group.v5_passes(Pass::Woken), 2);
+
+	let text = registry.render();
+	let parsed = parse(&text);
+
+	for line in [
+		"tuwunel_sync_v5_pass_seconds_count{pass=\"first\"} 1\n",
+		"tuwunel_sync_v5_pass_seconds_count{pass=\"woken\"} 2\n",
+		"tuwunel_sync_v5_unknown_pos_total 1\n",
+		"tuwunel_sync_v5_connection_state_bytes_bucket{le=\"4096\"} 0\n",
+		"tuwunel_sync_v5_connection_state_bytes_bucket{le=\"16384\"} 1\n",
+		"tuwunel_sync_v5_response_rooms_bucket{le=\"0\"} 1\n",
+		"tuwunel_sync_v5_response_rooms_bucket{le=\"50\"} 2\n",
+		"tuwunel_sync_v5_connections_loaded 7\n",
+		"tuwunel_sync_v5_connections_stored 9\n",
+		"tuwunel_sync_v5_store_bytes 4096\n",
 	] {
 		assert!(text.contains(line), "{line}\n{text}");
 	}

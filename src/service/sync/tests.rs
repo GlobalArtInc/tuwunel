@@ -1001,6 +1001,55 @@ async fn dropping_connections_deletes_only_the_matches() -> Result {
 	Ok(())
 }
 
+#[tokio::test]
+async fn stored_connections_are_measured_and_counted_by_the_collector() -> Result {
+	let Some(fixture) = fixture(Figment::new().merge(("metrics.enable", true))).await? else {
+		return Ok(());
+	};
+
+	let services = &fixture.services;
+	let registry = services.server.metrics.enable_prometheus();
+	let sync = &services.sync;
+	let keys = connection_keys();
+
+	create_devices(&services.users, user_id!("@alice:localhost"), &[
+		device_id!("PHONE"),
+		device_id!("LAPTOP"),
+	])
+	.await?;
+
+	for key in &keys[..3] {
+		let conn = sync.load_or_init_connection(key).await?;
+
+		sync.store_connection(key, &conn, &*conn.lock().await)
+			.await?;
+	}
+
+	assert_eq!(registry.sync.v5_states(), 3);
+	assert_eq!(sync.loaded_connection_count(), Some(3));
+
+	let held = sync.connections.lock().await;
+	assert_eq!(sync.loaded_connection_count(), None);
+	drop(held);
+
+	services.metrics.collect_once().await;
+	services.metrics.count_once().await;
+
+	let text = registry.render();
+
+	for line in [
+		"tuwunel_sync_v5_connections_loaded 3\n",
+		"tuwunel_sync_v5_connections_stored 3\n",
+		"tuwunel_sync_v5_connection_state_bytes_count 3\n",
+	] {
+		assert!(text.contains(line), "{line}\n{text}");
+	}
+
+	assert!(text.contains("tuwunel_sync_v5_store_bytes "), "{text}");
+
+	Ok(())
+}
+
 #[test]
 fn device_removal_needs_a_confirmed_absence() {
 	assert!(matches!(confirmed_removed(None), Ok(false)));
