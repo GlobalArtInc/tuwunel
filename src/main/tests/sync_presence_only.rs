@@ -31,6 +31,8 @@ mod require;
 const ALICE_TOKEN: &str = "sync-presence-only-alice-device-token-one";
 const BOB_TOKEN: &str = "sync-presence-only-bob-device-token-one";
 
+const PRESENCE_TYPES_NONE: &str = r#"{"presence":{"types":[]}}"#;
+
 #[test]
 fn presence_only_sync_keeps_waiting_above_the_threshold() -> Result { run(1, true) }
 
@@ -40,7 +42,14 @@ fn presence_only_sync_answers_when_the_mode_is_off() -> Result { run(0, false) }
 #[test]
 fn presence_only_sync_answers_below_the_threshold() -> Result { run(2, false) }
 
+#[test]
+fn presence_types_filter_drops_presence() -> Result { serve(0, exercise_types_filter) }
+
 fn run(min_rooms: usize, held: bool) -> Result {
+	serve(min_rooms, async |services, base| exercise(services, base, held).await)
+}
+
+fn serve(min_rooms: usize, scenario: impl AsyncFnOnce(&Services, &str) -> Result) -> Result {
 	let listener = TcpListener::bind(("127.0.0.1", 0))?;
 	let port = listener.local_addr()?.port();
 
@@ -63,7 +72,7 @@ fn run(min_rooms: usize, held: bool) -> Result {
 		drop(listener);
 
 		let driven = async {
-			let outcome = exercise(&services, &base, held).await;
+			let outcome = scenario(&services, &base).await;
 			let shutdown = server.server.shutdown();
 
 			outcome.and(shutdown)
@@ -95,7 +104,7 @@ async fn exercise(services: &Services, base: &str, held: bool) -> Result {
 
 	bob.admit(&room, &alice, &alice_id).await?;
 
-	let since = field(&alice.sync(None).await?, "next_batch")?.to_owned();
+	let since = field(&alice.sync(None, None).await?, "next_batch")?.to_owned();
 
 	bob.put(
 		&format!("presence/{bob_id}/status"),
@@ -106,14 +115,8 @@ async fn exercise(services: &Services, base: &str, held: bool) -> Result {
 	)
 	.await?;
 
-	let response = alice.sync(Some(&since)).await?;
-	let from_bob = response["presence"]["events"]
-		.as_array()
-		.is_some_and(|events| {
-			events
-				.iter()
-				.any(|event| event["sender"] == bob_id.as_str())
-		});
+	let response = alice.sync(Some(&since), None).await?;
+	let from_bob = presence_from(&response, bob_id.as_str());
 
 	require(
 		from_bob != held,
@@ -137,9 +140,60 @@ async fn exercise(services: &Services, base: &str, held: bool) -> Result {
 	)
 }
 
+async fn exercise_types_filter(services: &Services, base: &str) -> Result {
+	wait_until_ready(services, base).await?;
+
+	let (alice_id, alice) = account(services, base, "poalice", ALICE_TOKEN).await?;
+	let (bob_id, bob) = account(services, base, "pobob", BOB_TOKEN).await?;
+
+	let room = bob
+		.create_room(&json!({ "preset": "private_chat" }))
+		.await?;
+
+	bob.admit(&room, &alice, &alice_id).await?;
+
+	let since = field(&alice.sync(None, None).await?, "next_batch")?.to_owned();
+
+	bob.put(
+		&format!("presence/{bob_id}/status"),
+		&json!({
+			"presence": "unavailable",
+			"status_msg": "away from keyboard",
+		}),
+	)
+	.await?;
+
+	let filtered = alice
+		.sync(Some(&since), Some(PRESENCE_TYPES_NONE))
+		.await?;
+
+	require(
+		!presence_from(&filtered, bob_id.as_str()),
+		"the presence types filter let the presence of the other user through",
+	)?;
+
+	let plain = alice.sync(Some(&since), None).await?;
+
+	require(
+		presence_from(&plain, bob_id.as_str()),
+		"the response without the filter omitted the presence of the other user",
+	)
+}
+
+fn presence_from(response: &Value, user_id: &str) -> bool {
+	response["presence"]["events"]
+		.as_array()
+		.is_some_and(|events| {
+			events
+				.iter()
+				.any(|event| event["sender"] == user_id)
+		})
+}
+
 #[implement(Client, params = "<'_>")]
-async fn sync(&self, since: Option<&str>) -> Result<Value> {
+async fn sync(&self, since: Option<&str>, filter: Option<&str>) -> Result<Value> {
 	let since = since.map(|since| ("since", since));
+	let filter = filter.map(|filter| ("filter", filter));
 
 	self.services
 		.client
@@ -149,6 +203,7 @@ async fn sync(&self, since: Option<&str>) -> Result<Value> {
 		.bearer_auth(self.token)
 		.query(&[("timeout", "0")])
 		.query(since.as_slice())
+		.query(filter.as_slice())
 		.send()
 		.await?
 		.error_for_status()?

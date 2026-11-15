@@ -43,7 +43,7 @@ use tuwunel_core::{
 		stream::{BroadbandExt, Tools},
 	},
 };
-use tuwunel_matrix::event::Matches;
+use tuwunel_matrix::event::{Matches, matches_kind};
 use tuwunel_service::{Services, presence::Ping, users::InviteFilter};
 
 use super::{
@@ -917,6 +917,10 @@ async fn process_presence_updates(
 	syncing_user: &UserId,
 	filter: &FilterDefinition,
 ) -> PresenceUpdates {
+	if !matches_kind(&filter.presence, "m.presence") {
+		return HashMap::new();
+	}
+
 	services
 		.presence
 		.presence_since(since, Some(next_batch))

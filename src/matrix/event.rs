@@ -28,7 +28,7 @@ use serde_json::{Value as JsonValue, value::RawValue as RawJsonValue};
 use tuwunel_core::{Result, utils, utils::BoolExt};
 
 pub use self::{
-	filter::{Matches, trim_event_fields},
+	filter::{Matches, matches_kind, trim_event_fields},
 	format::{Owned, Ref},
 	id::*,
 	msgtype::MsgType,

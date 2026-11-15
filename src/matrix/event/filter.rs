@@ -162,6 +162,50 @@ fn matches_url<E: Event>(event: &E, filter: &RoomEventFilter) -> bool {
 	}
 }
 
+/// Whether a filter admits a kind such as `m.presence`, applying `not_types`
+/// first and then `types`; `*` in either list matches any run of characters.
+#[must_use]
+pub fn matches_kind(filter: &Filter, kind: &str) -> bool {
+	if filter
+		.not_types
+		.iter()
+		.any(|pattern| glob_matches(pattern, kind))
+	{
+		return false;
+	}
+
+	filter.types.as_ref().is_none_or(|types| {
+		types
+			.iter()
+			.any(|pattern| glob_matches(pattern, kind))
+	})
+}
+
+fn glob_matches(pattern: &str, kind: &str) -> bool {
+	let (pattern, kind) = (pattern.as_bytes(), kind.as_bytes());
+	let (mut p, mut k) = (0, 0);
+	let (mut star, mut resume) = (None, 0);
+
+	while k < kind.len() {
+		if pattern.get(p) == Some(&b'*') {
+			star = Some(p);
+			resume = k;
+			p = p.saturating_add(1);
+		} else if pattern.get(p) == Some(&kind[k]) {
+			p = p.saturating_add(1);
+			k = k.saturating_add(1);
+		} else if let Some(anchor) = star {
+			p = anchor.saturating_add(1);
+			resume = resume.saturating_add(1);
+			k = resume;
+		} else {
+			return false;
+		}
+	}
+
+	pattern[p..].iter().all(|&byte| byte == b'*')
+}
+
 /// Restrict a serialized event to the requested `event_fields` per MSC3980,
 /// returning it unchanged when no filter is set so the common sync pays
 /// nothing.
@@ -261,9 +305,36 @@ fn split_field(field: &str) -> FieldPath {
 
 #[cfg(test)]
 mod tests {
-	use super::split_field;
+	use serde_json::{Value, json};
+
+	use super::{Filter, matches_kind, split_field};
 
 	fn segments(field: &str) -> Vec<String> { split_field(field).into_vec() }
+
+	fn filter(value: Value) -> Filter { serde_json::from_value(value).unwrap() }
+
+	#[test]
+	fn types_list_admits_only_listed_kinds() {
+		assert!(!matches_kind(&filter(json!({ "types": [] })), "m.presence"));
+		assert!(matches_kind(&filter(json!({ "types": ["m.presence"] })), "m.presence"));
+		assert!(!matches_kind(&filter(json!({ "types": ["m.room.message"] })), "m.presence"));
+	}
+
+	#[test]
+	fn types_glob_matches_any_run() {
+		assert!(matches_kind(&filter(json!({ "types": ["m.*"] })), "m.presence"));
+	}
+
+	#[test]
+	fn not_types_excludes_listed_kinds() {
+		assert!(!matches_kind(&filter(json!({ "not_types": ["m.presence"] })), "m.presence"));
+		assert!(!matches_kind(&filter(json!({ "not_types": ["*"] })), "m.presence"));
+	}
+
+	#[test]
+	fn absent_type_lists_admit_every_kind() {
+		assert!(matches_kind(&filter(json!({})), "m.presence"));
+	}
 
 	#[test]
 	fn split_simple_path() {
