@@ -154,6 +154,16 @@ label_set! {
 }
 
 label_set! {
+	/// Where a v3 build took the joined rooms to look at from.
+	pub enum BuildPath("path") {
+		/// Only the rooms the change journal and typing named.
+		Candidates => "candidates",
+		/// Every room the account has joined.
+		Scan => "scan",
+	}
+}
+
+label_set! {
 	/// The fast path finding that the change journal failed to account for.
 	pub enum JournalKind("kind") {
 		/// A new event was in the timeline.
@@ -185,7 +195,10 @@ pub struct SyncMetrics {
 	v3_build_outcomes: EnumFamily<Build, Counter>,
 	v3_sections: EnumFamily<Section, Counter>,
 	v3_left_rooms_per_sync: Histogram<15>,
+	v3_build_paths: EnumFamily<BuildPath, Counter>,
+	v3_candidates_per_sync: Histogram<15>,
 	fastpath_mismatches: Counter,
+	candidates_misses: Counter,
 	journal_entries: Gauge,
 	journal_evictions: Counter,
 	journal_misses: EnumFamily<JournalKind, Counter>,
@@ -221,7 +234,10 @@ impl SyncMetrics {
 			v3_build_outcomes: EnumFamily::new(Counter::new),
 			v3_sections: EnumFamily::new(Counter::new),
 			v3_left_rooms_per_sync: Histogram::new(&ROOMS),
+			v3_build_paths: EnumFamily::new(Counter::new),
+			v3_candidates_per_sync: Histogram::new(&ROOMS),
 			fastpath_mismatches: Counter::new(),
+			candidates_misses: Counter::new(),
 			journal_entries: Gauge::new(),
 			journal_evictions: Counter::new(),
 			journal_misses: EnumFamily::new(Counter::new),
@@ -291,9 +307,25 @@ impl SyncMetrics {
 	}
 
 	#[inline]
+	/// Counts one v3 build by where it took its joined rooms from.
+	pub fn v3_build_path(&self, path: BuildPath) { self.v3_build_paths.get(path).inc(); }
+
+	#[inline]
+	/// Records how many candidate rooms one v3 build took its joined rooms
+	/// from.
+	pub fn v3_candidates_per_sync(&self, rooms: u64) {
+		self.v3_candidates_per_sync.observe(rooms);
+	}
+
+	#[inline]
 	/// Counts a room where the verified fast path disagreed with the full
 	/// computation.
 	pub fn fastpath_mismatch(&self) { self.fastpath_mismatches.inc(); }
+
+	#[inline]
+	/// Counts a room that a full walk answered with changes and that the
+	/// candidates did not hold.
+	pub fn candidates_miss(&self) { self.candidates_misses.inc(); }
 
 	/// Stores the number of changes the sync journal holds.
 	pub fn set_journal_entries(&self, entries: u64) {
@@ -397,8 +429,22 @@ impl SyncMetrics {
 	pub fn v3_left_syncs(&self) -> u64 { self.v3_left_rooms_per_sync.count() }
 
 	#[must_use]
+	/// Returns the number of v3 builds counted for a path.
+	pub fn v3_build_paths_counted(&self, path: BuildPath) -> u64 {
+		self.v3_build_paths.get(path).get()
+	}
+
+	#[must_use]
+	/// Returns the number of v3 builds whose candidate rooms were counted.
+	pub fn v3_candidate_syncs(&self) -> u64 { self.v3_candidates_per_sync.count() }
+
+	#[must_use]
 	/// Returns the number of fast path mismatches counted.
 	pub fn fastpath_mismatches(&self) -> u64 { self.fastpath_mismatches.get() }
+
+	#[must_use]
+	/// Returns the number of candidate misses counted.
+	pub fn candidates_missed(&self) -> u64 { self.candidates_misses.get() }
 
 	#[must_use]
 	/// Returns the number of changes the sync journal holds.
@@ -491,9 +537,28 @@ impl SyncMetrics {
 			&self.v3_left_rooms_per_sync,
 		);
 		w.metric(
+			"tuwunel_sync_v3_build_paths_total",
+			"v3 sync builds by where they took their joined rooms from: candidates when only \
+			 the rooms named by the change journal and typing were looked at, scan when every \
+			 joined room was.",
+			&self.v3_build_paths,
+		);
+		w.metric(
+			"tuwunel_sync_v3_candidates_per_sync",
+			"Candidate rooms one v3 sync build took its joined rooms from, after the room \
+			 filter and before the membership check.",
+			&self.v3_candidates_per_sync,
+		);
+		w.metric(
 			"tuwunel_sync_fastpath_mismatches_total",
 			"Rooms where the verified sync fast path disagreed with the full computation.",
 			&self.fastpath_mismatches,
+		);
+		w.metric(
+			"tuwunel_sync_candidates_misses_total",
+			"Rooms a full v3 walk answered with changes that the candidate rooms did not hold; \
+			 any count above zero means a change the journal and typing do not name.",
+			&self.candidates_misses,
 		);
 		w.metric(
 			"tuwunel_sync_journal_entries",
@@ -576,7 +641,10 @@ impl SyncMetrics {
 			self.v3_build_outcomes.series(),
 			self.v3_sections.series(),
 			self.v3_left_rooms_per_sync.series(),
+			self.v3_build_paths.series(),
+			self.v3_candidates_per_sync.series(),
 			self.fastpath_mismatches.series(),
+			self.candidates_misses.series(),
 			self.journal_entries.series(),
 			self.journal_evictions.series(),
 			self.journal_misses.series(),

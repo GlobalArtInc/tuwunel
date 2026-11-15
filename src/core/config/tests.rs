@@ -543,6 +543,20 @@ fn sync_fastpath_switches_default_off_and_reload() {
 }
 
 #[test]
+fn sync_candidates_switches_default_off_and_reload() {
+	let default = default_config();
+	let enabled =
+		config_from_toml("[global.client.sync]\ncandidates = true\ncandidates_verify = true\n")
+			.unwrap();
+
+	assert!(!default.client.sync.candidates);
+	assert!(!default.client.sync.candidates_verify);
+	assert!(enabled.client.sync.candidates);
+	assert!(enabled.client.sync.candidates_verify);
+	reload(&default, &enabled).expect("sync candidates switches should reload");
+}
+
+#[test]
 fn sync_presence_only_min_rooms_default_off_and_reload() {
 	let default = default_config();
 	let enabled =

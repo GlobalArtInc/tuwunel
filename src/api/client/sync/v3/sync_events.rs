@@ -5,8 +5,9 @@ use std::{
 
 use axum::extract::State;
 use futures::{
-	FutureExt, StreamExt, TryFutureExt,
+	FutureExt, Stream, StreamExt, TryFutureExt,
 	future::{join, join3, join4, join5},
+	stream::BoxStream,
 };
 use ruma::{
 	DeviceId, OwnedRoomId, OwnedUserId, UserId,
@@ -33,9 +34,10 @@ use tokio::time::timeout_at;
 use tuwunel_core::{
 	Result, at, debug,
 	debug::INFO_SPAN_LEVEL,
+	error,
 	error::inspect_log,
 	extract_variant,
-	metrics::prom::{Api, Build, Phase, Registry, Reply, Section, SinceKind},
+	metrics::prom::{Api, Build, BuildPath, Phase, Registry, Reply, Section, SinceKind},
 	trace,
 	utils::{
 		BoolExt, IterStream, ReadyExt, TryFutureExtExt,
@@ -729,6 +731,31 @@ async fn build_sync_events(
 	})
 }
 
+type Assembled = (
+	BTreeMap<OwnedRoomId, JoinedRoom>,
+	HashSet<OwnedUserId>,
+	HashSet<OwnedUserId>,
+	Tally,
+);
+
+enum Source {
+	Scan,
+	Candidates(Vec<OwnedRoomId>),
+	Verify(HashSet<OwnedRoomId>),
+}
+
+struct JoinedBuild<'a> {
+	services: &'a Services,
+	sender_user: &'a UserId,
+	sender_device: Option<&'a DeviceId>,
+	since: u64,
+	next_batch: u64,
+	full_state: bool,
+	state_after: StateAfter,
+	filter: &'a FilterDefinition,
+	changed: Arc<Changed>,
+}
+
 #[expect(clippy::too_many_arguments)]
 fn collect_joined_rooms<'a>(
 	services: &'a Services,
@@ -743,54 +770,247 @@ fn collect_joined_rooms<'a>(
 	Output = (BTreeMap<OwnedRoomId, JoinedRoom>, HashSet<OwnedUserId>, HashSet<OwnedUserId>),
 > + Send
 + 'a {
-	let changed = Arc::new(Changed::default());
+	JoinedBuild {
+		services,
+		sender_user,
+		sender_device,
+		since,
+		next_batch,
+		full_state,
+		state_after,
+		filter,
+		changed: Arc::new(Changed::default()),
+	}
+	.run()
+}
 
-	services
-		.state_cache
-		.rooms_joined(sender_user)
-		.ready_filter(|&room_id| filter.room.matches(room_id))
-		.map(ToOwned::to_owned)
-		.broad_filter_map(move |room_id| {
-			load_room_or_skip(
-				services,
-				sender_user,
-				sender_device,
-				room_id.clone(),
-				since,
-				next_batch,
-				full_state,
-				state_after,
-				filter,
-				Arc::clone(&changed),
-			)
-			.map_ok(move |(joined_room, dlu, jeu, verdict)| {
-				(room_id, joined_room, dlu, jeu, verdict)
+impl JoinedBuild<'_> {
+	async fn run(
+		self,
+	) -> (BTreeMap<OwnedRoomId, JoinedRoom>, HashSet<OwnedUserId>, HashSet<OwnedUserId>) {
+		let registry = self.services.server.metrics.prometheus();
+		let source = self.source(registry).await;
+
+		if let Some(registry) = registry {
+			let path = match source {
+				| Source::Candidates(_) => BuildPath::Candidates,
+				| Source::Scan | Source::Verify(_) => BuildPath::Scan,
+			};
+
+			registry.sync.v3_build_path(path);
+		}
+
+		let (rooms, candidates) = match source {
+			| Source::Scan => (self.scan().boxed(), None),
+			| Source::Candidates(rooms) => (rooms.into_iter().stream().boxed(), None),
+			| Source::Verify(candidates) => (self.scan().boxed(), Some(candidates)),
+		};
+
+		let (joined_rooms, device_list_updates, left_encrypted_users, tally) =
+			self.assemble(rooms).await;
+
+		if let Some(candidates) = candidates {
+			self.verify(&candidates, &joined_rooms).await;
+		}
+
+		tally.log(self.since, self.next_batch);
+
+		if let Some(registry) = registry {
+			tally.publish(&registry.sync);
+		}
+
+		(joined_rooms, device_list_updates, left_encrypted_users)
+	}
+
+	async fn source(&self, registry: Option<&Registry>) -> Source {
+		let sync = self.services.config.client.sync;
+		let wanted =
+			(sync.candidates || sync.candidates_verify) && self.since != 0 && !self.full_state;
+
+		if !wanted {
+			return Source::Scan;
+		}
+
+		let Some(changed) = self
+			.changed
+			.rooms(self.services, self.sender_user, self.since)
+		else {
+			return Source::Scan;
+		};
+
+		let typing = self.services.typing.rooms_with_typists().await;
+		let rooms = union_rooms(changed, typing, self.filter);
+
+		if let Some(registry) = registry {
+			registry
+				.sync
+				.v3_candidates_per_sync(u64::try_from(rooms.len()).unwrap_or(u64::MAX));
+		}
+
+		if sync.candidates_verify {
+			return Source::Verify(rooms);
+		}
+
+		let (services, sender_user) = (self.services, self.sender_user);
+		let joined = keep_joined(rooms, async |room_id| {
+			services
+				.state_cache
+				.is_joined(sender_user, &room_id)
+				.await
+		})
+		.await;
+
+		Source::Candidates(joined)
+	}
+
+	fn scan(&self) -> impl Stream<Item = OwnedRoomId> + Send + '_ {
+		self.services
+			.state_cache
+			.rooms_joined(self.sender_user)
+			.ready_filter(|&room_id| self.filter.room.matches(room_id))
+			.map(ToOwned::to_owned)
+	}
+
+	fn assemble<'s>(
+		&'s self,
+		rooms: BoxStream<'s, OwnedRoomId>,
+	) -> impl Future<Output = Assembled> + Send + 's {
+		rooms
+			.broad_filter_map(|room_id| {
+				load_room_or_skip(
+					self.services,
+					self.sender_user,
+					self.sender_device,
+					room_id.clone(),
+					self.since,
+					self.next_batch,
+					self.full_state,
+					self.state_after,
+					self.filter,
+					Arc::clone(&self.changed),
+				)
+				.map_ok(move |(joined_room, dlu, jeu, verdict)| {
+					(room_id, joined_room, dlu, jeu, verdict)
+				})
+				.ok()
 			})
-			.ok()
-		})
-		.ready_fold(
-			(BTreeMap::new(), HashSet::new(), HashSet::new(), Tally::default()),
-			|(mut joined_rooms, mut device_list_updates, mut left_encrypted_users, mut tally),
-			 (room_id, joined_room, dlu, leu, verdict)| {
-				device_list_updates.extend(dlu);
-				left_encrypted_users.extend(leu);
-				tally.record(verdict);
-				if !joined_room.is_empty() {
-					joined_rooms.insert(room_id, joined_room);
-				}
+			.ready_fold(
+				(BTreeMap::new(), HashSet::new(), HashSet::new(), Tally::default()),
+				|(
+					mut joined_rooms,
+					mut device_list_updates,
+					mut left_encrypted_users,
+					mut tally,
+				),
+				 (room_id, joined_room, dlu, leu, verdict)| {
+					device_list_updates.extend(dlu);
+					left_encrypted_users.extend(leu);
+					tally.record(verdict);
+					if !joined_room.is_empty() {
+						joined_rooms.insert(room_id, joined_room);
+					}
 
-				(joined_rooms, device_list_updates, left_encrypted_users, tally)
-			},
-		)
-		.map(move |(joined_rooms, device_list_updates, left_encrypted_users, tally)| {
-			tally.log(since, next_batch);
+					(joined_rooms, device_list_updates, left_encrypted_users, tally)
+				},
+			)
+	}
 
-			if let Some(registry) = services.server.metrics.prometheus() {
-				tally.publish(&registry.sync);
+	async fn verify(
+		&self,
+		candidates: &HashSet<OwnedRoomId>,
+		answered: &BTreeMap<OwnedRoomId, JoinedRoom>,
+	) {
+		let unaccounted = unaccounted_rooms(answered, candidates);
+
+		if unaccounted.is_empty() {
+			return;
+		}
+
+		let Some(changed) = self
+			.services
+			.sync
+			.journal
+			.changed_rooms(self.sender_user, self.since)
+		else {
+			debug!(
+				target: "tuwunel_api_client::sync::v3",
+				user_id = %self.sender_user,
+				since = self.since,
+				"sync candidates verification skipped, the journal no longer covers since"
+			);
+
+			return;
+		};
+
+		let typing = self.services.typing.rooms_with_typists().await;
+		let fresh = union_rooms(&changed, typing, self.filter);
+
+		for room_id in missed_rooms(answered, candidates, &fresh) {
+			error!(
+				target: "tuwunel_api_client::sync::v3",
+				%room_id,
+				user_id = %self.sender_user,
+				since = self.since,
+				next_batch = self.next_batch,
+				"sync candidates miss, a room with changes is neither in the journal nor typing"
+			);
+
+			if let Some(registry) = self.services.server.metrics.prometheus() {
+				registry.sync.candidates_miss();
 			}
+		}
+	}
+}
 
-			(joined_rooms, device_list_updates, left_encrypted_users)
+pub(super) fn union_rooms(
+	changed: &HashSet<OwnedRoomId>,
+	typing: Vec<OwnedRoomId>,
+	filter: &FilterDefinition,
+) -> HashSet<OwnedRoomId> {
+	let mut rooms = changed.clone();
+
+	rooms.extend(typing);
+	rooms.retain(|room_id| filter.room.matches(room_id));
+	rooms
+}
+
+pub(super) async fn keep_joined<Joined, Fut>(
+	rooms: HashSet<OwnedRoomId>,
+	joined: Joined,
+) -> Vec<OwnedRoomId>
+where
+	Joined: Fn(OwnedRoomId) -> Fut + Send + Sync,
+	Fut: Future<Output = bool> + Send,
+{
+	rooms
+		.into_iter()
+		.stream()
+		.broad_filter_map(|room_id| {
+			joined(room_id.clone()).map(move |joined| joined.then_some(room_id))
 		})
+		.collect()
+		.await
+}
+
+pub(super) fn unaccounted_rooms<'a>(
+	answered: &'a BTreeMap<OwnedRoomId, JoinedRoom>,
+	candidates: &HashSet<OwnedRoomId>,
+) -> Vec<&'a OwnedRoomId> {
+	answered
+		.keys()
+		.filter(|room_id| !candidates.contains(*room_id))
+		.collect()
+}
+
+pub(super) fn missed_rooms<'a>(
+	answered: &'a BTreeMap<OwnedRoomId, JoinedRoom>,
+	snapshot: &HashSet<OwnedRoomId>,
+	live: &HashSet<OwnedRoomId>,
+) -> Vec<&'a OwnedRoomId> {
+	answered
+		.keys()
+		.filter(|room_id| !snapshot.contains(*room_id) && !live.contains(*room_id))
+		.collect()
 }
 
 async fn collect_invited_rooms<'a>(

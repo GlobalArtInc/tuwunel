@@ -105,7 +105,10 @@ shares the `_other` series.
 | `tuwunel_sync_v3_builds_total` | counter | `outcome` |
 | `tuwunel_sync_v3_response_sections_total` | counter | `section` |
 | `tuwunel_sync_v3_left_rooms_per_sync` | histogram | none |
+| `tuwunel_sync_v3_build_paths_total` | counter | `path` |
+| `tuwunel_sync_v3_candidates_per_sync` | histogram | none |
 | `tuwunel_sync_fastpath_mismatches_total` | counter | none |
+| `tuwunel_sync_candidates_misses_total` | counter | none |
 | `tuwunel_sync_journal_entries` | gauge | none |
 | `tuwunel_sync_journal_evictions_total` | counter | none |
 | `tuwunel_sync_journal_misses_total` | counter | `kind` |
@@ -150,11 +153,24 @@ responses that carry data, so one response can count several. `section` is
 `rooms`, `presence`, `account_data`, `device_lists`, `to_device` or `users`.
 `tuwunel_sync_v3_left_rooms_per_sync` counts the departed rooms one build walked,
 before the room filter.
+`tuwunel_sync_v3_build_paths_total` counts v3 builds by where they took their joined
+rooms from: `candidates` when only the rooms named by the journal and by typing were
+looked at, `scan` when every joined room was. Only an incremental build with a `since`
+inside what the journal covers can take the `candidates` path, and only with
+`candidates` on; `candidates_verify` always scans. `tuwunel_sync_v3_candidates_per_sync`
+counts the candidate rooms of a build that works them out, which is a build on the
+`candidates` path or one under `candidates_verify`, after the room filter and before
+the membership check, so it shows how much of the walk would be saved.
+`tuwunel_sync_v3_rooms_total` and `tuwunel_sync_v3_rooms_per_sync` count the rooms a
+build looked at, so they fall on the `candidates` path. `tuwunel_sync_candidates_misses_total` is counted only with
+`candidates_verify` on: a full walk answered a room with changes that the candidate
+rooms did not hold. It should stay at zero; a nonzero value means a change that neither
+the journal nor typing names, and the response still comes from the full walk.
 
 The sync journal is a bounded in-memory log of the rooms that changed, filled by
-every write the fast path probe looks at. It is checked in shadow only: the probe
-asks the journal about each room it finds busy or with a device-key change, and
-the answers to clients do not depend on it. The journal is written whether or not
+every write the fast path probe looks at. The probe asks the journal about each room
+it finds busy or with a device-key change, and the answers to clients depend on it
+only when `candidates` is on. The journal is written whether or not
 `fastpath` is on. `tuwunel_sync_journal_entries` is the number of changes held and
 stays at zero when `journal_capacity` is 0. `tuwunel_sync_journal_evictions_total`
 counts changes dropped to stay within the capacity. `tuwunel_sync_journal_misses_total`

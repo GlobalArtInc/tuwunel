@@ -5,7 +5,10 @@ use std::{
 
 use ruma::{
 	EventId, OwnedEventId, OwnedRoomId, UInt,
-	api::client::sync::sync_events::v3::{JoinedRoom, Response, State as RoomState, StateEvents},
+	api::client::{
+		filter::FilterDefinition,
+		sync::sync_events::v3::{JoinedRoom, Response, State as RoomState, StateEvents},
+	},
 	room_id,
 	serde::Raw,
 	uint,
@@ -25,7 +28,7 @@ use super::{
 		},
 	},
 	stale_since,
-	sync_events::presence_only,
+	sync_events::{keep_joined, missed_rooms, presence_only, unaccounted_rooms, union_rooms},
 };
 
 const SINCE: u64 = 100;
@@ -528,4 +531,64 @@ fn the_journal_is_asked_once_per_build_however_many_rooms_ask() {
 	assert_eq!(unanswered.rooms_with(none), None);
 	assert_eq!(unanswered.rooms_with(none), None);
 	assert_eq!(asked.get(), 2);
+}
+
+#[tokio::test]
+async fn candidates_are_the_journal_and_typing_rooms_that_match_the_filter_and_are_joined() {
+	let room = |id: &str| OwnedRoomId::try_from(id).unwrap();
+	let changed =
+		HashSet::from([room("!a:localhost"), room("!b:localhost"), room("!hidden:localhost")]);
+	let typing = vec![room("!b:localhost"), room("!c:localhost"), room("!left:localhost")];
+	let mut filter = FilterDefinition::default();
+
+	filter.room.not_rooms = vec![room("!hidden:localhost")];
+
+	let union = union_rooms(&changed, typing, &filter);
+
+	assert_eq!(
+		union,
+		HashSet::from([
+			room("!a:localhost"),
+			room("!b:localhost"),
+			room("!c:localhost"),
+			room("!left:localhost"),
+		])
+	);
+
+	let member = HashSet::from([room("!a:localhost"), room("!c:localhost")]);
+	let member = &member;
+	let mut joined = keep_joined(union, async |room_id| member.contains(&room_id)).await;
+
+	joined.sort();
+
+	assert_eq!(joined, [room("!a:localhost"), room("!c:localhost")]);
+}
+
+#[test]
+fn only_answered_rooms_outside_the_candidates_are_unaccounted() {
+	let room = |id: &str| OwnedRoomId::try_from(id).unwrap();
+	let answered = BTreeMap::from([
+		(room("!held:localhost"), JoinedRoom::default()),
+		(room("!lost:localhost"), JoinedRoom::default()),
+	]);
+	let candidates = HashSet::from([room("!held:localhost"), room("!other:localhost")]);
+
+	assert_eq!(unaccounted_rooms(&answered, &candidates), [&room("!lost:localhost")]);
+	assert!(unaccounted_rooms(&BTreeMap::new(), &candidates).is_empty());
+}
+
+#[test]
+fn a_room_changed_after_the_snapshot_is_no_miss_unless_the_live_journal_lacks_it() {
+	let room = |id: &str| OwnedRoomId::try_from(id).unwrap();
+	let answered = BTreeMap::from([
+		(room("!held:localhost"), JoinedRoom::default()),
+		(room("!late:localhost"), JoinedRoom::default()),
+		(room("!lost:localhost"), JoinedRoom::default()),
+	]);
+	let snapshot = HashSet::from([room("!held:localhost")]);
+	let live = HashSet::from([room("!held:localhost"), room("!late:localhost")]);
+
+	assert_eq!(unaccounted_rooms(&answered, &snapshot).len(), 2);
+	assert_eq!(missed_rooms(&answered, &snapshot, &live), [&room("!lost:localhost")]);
+	assert!(missed_rooms(&answered, &snapshot, &answered.keys().cloned().collect()).is_empty());
 }

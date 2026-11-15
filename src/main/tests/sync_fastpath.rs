@@ -1,13 +1,14 @@
 #![cfg(test)]
 
-use std::net::TcpListener;
+use std::{net::TcpListener, time::Duration};
 
 use futures::future::join;
 use serde_json::{Map, Value, json};
+use tokio::time::sleep;
 use tuwunel::{Args, Runtime, Server, async_run, async_start, async_stop};
 use tuwunel_core::{
 	Result, err, implement,
-	metrics::prom::{Api, Fastpath, JournalKind, Reply, SinceKind},
+	metrics::prom::{Api, BuildPath, Fastpath, JournalKind, Reply, SinceKind, SyncMetrics},
 	ruma::{MilliSecondsSinceUnixEpoch, RoomId, events::receipt::ReceiptThread},
 };
 use tuwunel_service::{Services, rooms::read_receipt::PrivateRead, users::DeviceListChange};
@@ -48,25 +49,73 @@ const ALICE_SECOND_TOKEN: &str = "sync-fastpath-alice-device-token-two";
 const BOB_TOKEN: &str = "sync-fastpath-bob-device-token-one";
 const CAROL_TOKEN: &str = "sync-fastpath-carol-device-token-one";
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Mode {
+	Fastpath,
+	FastpathVerify,
+	Candidates,
+	CandidatesVerify,
+}
+
+impl Mode {
+	fn verifies_fastpath(self) -> bool { self == Self::FastpathVerify }
+
+	fn gathers(self) -> bool { self == Self::Candidates }
+
+	fn verifies_candidates(self) -> bool { self == Self::CandidatesVerify }
+}
+
 #[test]
 fn fastpath_answers_each_change_like_the_assembled_path() -> Result {
-	run("client.sync.fastpath=true", false)
+	run(&["client.sync.fastpath=true"], Scenario::Busy(Mode::Fastpath))
 }
 
 #[test]
 fn fastpath_verification_finds_no_mismatch() -> Result {
-	run("client.sync.fastpath_verify=true", true)
+	run(&["client.sync.fastpath_verify=true"], Scenario::Busy(Mode::FastpathVerify))
 }
 
-fn run(option: &str, verify: bool) -> Result {
+#[test]
+fn candidates_answer_each_change_like_the_assembled_path() -> Result {
+	run(
+		&["client.sync.fastpath=true", "client.sync.candidates=true"],
+		Scenario::Busy(Mode::Candidates),
+	)
+}
+
+#[test]
+fn candidates_verification_finds_no_miss() -> Result {
+	run(
+		&["client.sync.fastpath=true", "client.sync.candidates_verify=true"],
+		Scenario::Busy(Mode::CandidatesVerify),
+	)
+}
+
+#[test]
+fn candidates_deliver_the_end_of_typing() -> Result {
+	run(
+		&["client.sync.candidates=true", "typing.client_timeout_min_s=1"],
+		Scenario::TypingEnds,
+	)
+}
+
+#[derive(Clone, Copy)]
+enum Scenario {
+	Busy(Mode),
+	TypingEnds,
+}
+
+fn run(options: &[&str], scenario: Scenario) -> Result {
 	let listener = TcpListener::bind(("127.0.0.1", 0))?;
 	let port = listener.local_addr()?.port();
 
-	let args = Args::default_test(&["fresh", "cleanup"])
-		.with_loopback_listener(port)
-		.with_option("listening=true")
-		.with_option("logging.global_default=false")
-		.with_option(option);
+	let args = options.iter().fold(
+		Args::default_test(&["fresh", "cleanup"])
+			.with_loopback_listener(port)
+			.with_option("listening=true")
+			.with_option("logging.global_default=false"),
+		|args, option| args.with_option(*option),
+	);
 
 	let runtime = Runtime::new(Some(&args))?;
 	let server = Server::new(Some(&args), Some(&runtime))?;
@@ -80,7 +129,10 @@ fn run(option: &str, verify: bool) -> Result {
 		drop(listener);
 
 		let driven = async {
-			let outcome = exercise(&services, &base, verify).await;
+			let outcome = match scenario {
+				| Scenario::Busy(mode) => exercise(&services, &base, mode).await,
+				| Scenario::TypingEnds => typing_ends(&services, &base).await,
+			};
 			let shutdown = server.server.shutdown();
 
 			outcome.and(shutdown)
@@ -100,7 +152,7 @@ fn run(option: &str, verify: bool) -> Result {
 	result
 }
 
-async fn exercise(services: &Services, base: &str, verify: bool) -> Result {
+async fn exercise(services: &Services, base: &str, mode: Mode) -> Result {
 	wait_until_ready(services, base).await?;
 
 	let started = services.globals.current_count();
@@ -221,20 +273,7 @@ async fn exercise(services: &Services, base: &str, verify: bool) -> Result {
 		.put(&global, &json!({ "kept": true }))
 		.await?;
 
-	let seen = watch.round().await?;
-
-	require(
-		seen["account_data"]
-			.to_string()
-			.contains("u.fastpath"),
-		"the global account data round omitted the event",
-	)?;
-	require(
-		seen["rooms"]["join"]
-			.as_object()
-			.is_none_or(Map::is_empty),
-		"the global account data round reported rooms",
-	)?;
+	global_account_data_round(services, &mut watch, mode).await?;
 
 	let later = bob
 		.send_text(&target, "fastpath-two", "later")
@@ -293,21 +332,91 @@ async fn exercise(services: &Services, base: &str, verify: bool) -> Result {
 		.sees("unread_thread_notifications", later.as_str())
 		.await?;
 
-	finish(services, verify, started)
+	leaves(&alice, &joined, &mut watch).await?;
+
+	finish(services, mode, started)
 }
 
-fn finish(services: &Services, verify: bool, started: u64) -> Result {
+async fn global_account_data_round(
+	services: &Services,
+	watch: &mut Watch<'_>,
+	mode: Mode,
+) -> Result {
+	let viewed = rooms_viewed(&registry(services)?.sync);
+	let seen = watch.round().await?;
+	let viewed = rooms_viewed(&registry(services)?.sync).saturating_sub(viewed);
+
 	require(
-		!verify || services.sync.fastpath_mismatches() == 0,
-		"the verification mode recorded a mismatch",
+		!mode.gathers() || viewed <= 1,
+		"the candidate build looked at rooms that nothing named",
+	)?;
+	require(
+		seen["account_data"]
+			.to_string()
+			.contains("u.fastpath"),
+		"the global account data round omitted the event",
+	)?;
+	require(
+		seen["rooms"]["join"]
+			.as_object()
+			.is_none_or(Map::is_empty),
+		"the global account data round reported rooms",
+	)
+}
+
+async fn leaves(alice: &Client<'_>, joined: &RoomId, watch: &mut Watch<'_>) -> Result {
+	alice.act(joined, "leave").await?;
+
+	let seen = watch.round().await?;
+
+	require(
+		seen["rooms"]["join"]
+			.get(joined.as_str())
+			.is_none(),
+		"the leave round reported the left room as joined",
 	)?;
 
-	let registry = services
+	require(
+		seen["rooms"]["leave"]
+			.get(joined.as_str())
+			.is_some(),
+		"the leave round omitted the left room",
+	)
+}
+
+fn registry(services: &Services) -> Result<&tuwunel_core::metrics::prom::Registry> {
+	services
 		.server
 		.metrics
 		.prometheus()
-		.ok_or_else(|| err!("the metrics registry is off"))?;
-	let sync = &registry.sync;
+		.ok_or_else(|| err!("the metrics registry is off"))
+}
+
+fn rooms_viewed(sync: &SyncMetrics) -> u64 {
+	[
+		Fastpath::Off,
+		Fastpath::Quiet,
+		Fastpath::BusyTimeline,
+		Fastpath::BusyNoTimelineCount,
+		Fastpath::BusyTyping,
+		Fastpath::BusyPrivateRead,
+		Fastpath::BusyAccountData,
+		Fastpath::BusyReceipts,
+		Fastpath::BusyNotifications,
+		Fastpath::BusyError,
+	]
+	.into_iter()
+	.map(|verdict| sync.v3_rooms_counted(verdict))
+	.sum()
+}
+
+fn finish(services: &Services, mode: Mode, started: u64) -> Result {
+	require(
+		!mode.verifies_fastpath() || services.sync.fastpath_mismatches() == 0,
+		"the verification mode recorded a mismatch",
+	)?;
+
+	let sync = &registry(services)?.sync;
 
 	require(
 		sync.fastpath_mismatches() == services.sync.fastpath_mismatches(),
@@ -345,6 +454,73 @@ fn finish(services: &Services, verify: bool, started: u64) -> Result {
 			&format!("the journal missed a {kind:?} change the fast path found"),
 		)?;
 	}
+
+	require(sync.candidates_missed() == 0, "the candidates missed a room with changes")?;
+	require(
+		sync.v3_build_paths_counted(BuildPath::Candidates) == 0 || mode.gathers(),
+		"a build took the candidate path without the mode",
+	)?;
+	require(
+		!mode.gathers()
+			|| (sync.v3_build_paths_counted(BuildPath::Candidates) > 0
+				&& sync.v3_candidate_syncs() > 0),
+		"the candidate path was not taken",
+	)?;
+	require(
+		!mode.verifies_candidates()
+			|| (sync.v3_build_paths_counted(BuildPath::Candidates) == 0
+				&& sync.v3_build_paths_counted(BuildPath::Scan) > 0),
+		"the candidate verification did not walk every room",
+	)?;
+
+	Ok(())
+}
+
+async fn typing_ends(services: &Services, base: &str) -> Result {
+	wait_until_ready(services, base).await?;
+
+	let (_, alice) = account(services, base, "fpalice", ALICE_TOKEN).await?;
+	let (bob_id, bob) = account(services, base, "fpbob", BOB_TOKEN).await?;
+	let room = bob
+		.create_room(&json!({ "preset": "public_chat" }))
+		.await?;
+
+	alice.act(&room, "join").await?;
+
+	let since = field(&alice.sync(None, None).await?, "next_batch")?.to_owned();
+	let typing = json!({ "typing": true, "timeout": 1000 });
+
+	bob.put(&format!("rooms/{room}/typing/{bob_id}"), &typing)
+		.await?;
+
+	let started = alice.sync(Some(&since), None).await?;
+	let typists = &started["rooms"]["join"][room.as_str()]["ephemeral"];
+
+	require(
+		typists.to_string().contains(bob_id.as_str()),
+		"the typing round omitted the typist",
+	)?;
+
+	sleep(Duration::from_millis(1500)).await;
+
+	bob.create_room(&json!({ "preset": "private_chat" }))
+		.await?;
+
+	let since = field(&started, "next_batch")?.to_owned();
+	let ended = alice.sync(Some(&since), None).await?;
+	let ephemeral = ended["rooms"]["join"][room.as_str()]["ephemeral"].to_string();
+
+	require(
+		ephemeral.contains("m.typing") && !ephemeral.contains(bob_id.as_str()),
+		"the end of typing did not reach the client",
+	)?;
+
+	let sync = &registry(services)?.sync;
+
+	require(
+		sync.v3_build_paths_counted(BuildPath::Candidates) > 0,
+		"the candidate path was not taken",
+	)?;
 
 	Ok(())
 }

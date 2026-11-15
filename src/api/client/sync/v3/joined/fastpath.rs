@@ -103,7 +103,7 @@ struct Round<'a> {
 pub(in super::super) struct Changed(OnceLock<Option<HashSet<OwnedRoomId>>>);
 
 impl Changed {
-	fn rooms(
+	pub(in super::super) fn rooms(
 		&self,
 		services: &Services,
 		user: &UserId,

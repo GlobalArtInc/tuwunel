@@ -299,6 +299,18 @@ impl Service {
 			.unwrap_or(Ok(0))
 	}
 
+	/// Returns the rooms that hold a typing indicator, expired or not.
+	///
+	/// An indicator is removed, and its end announced, only when its room is
+	/// read, so a room listed here may have one still to end. It takes the read
+	/// lock for the in-memory pass only and never awaits under it.
+	pub async fn rooms_with_typists(&self) -> Vec<OwnedRoomId> {
+		self.typing
+			.read()
+			.map(|typing| typing_rooms(&typing))
+			.await
+	}
+
 	/// Returns the typing content with all typing users in the room.
 	async fn typings_content(&self, room_id: &RoomId) -> TypingEventContent {
 		let typing = self.typing.read().await;
@@ -441,4 +453,44 @@ impl Service {
 
 impl RoomTyping {
 	fn has_expired(&self, now: u64) -> bool { self.users.values().any(|timeout| *timeout < now) }
+}
+
+fn typing_rooms(typing: &BTreeMap<OwnedRoomId, RoomTyping>) -> Vec<OwnedRoomId> {
+	typing
+		.iter()
+		.filter(|(_, room)| !room.users.is_empty())
+		.map(|(room_id, _)| room_id.clone())
+		.collect()
+}
+
+#[cfg(test)]
+mod tests {
+	use std::collections::BTreeMap;
+
+	use ruma::{room_id, user_id};
+
+	use super::{RoomTyping, typing_rooms};
+
+	#[test]
+	fn a_room_is_listed_while_it_holds_an_indicator_even_an_expired_one() {
+		let mut typing = BTreeMap::new();
+
+		typing.insert(room_id!("!live:localhost").to_owned(), RoomTyping {
+			users: BTreeMap::from([(user_id!("@a:localhost").to_owned(), u64::MAX)]),
+			update: 7,
+		});
+		typing.insert(room_id!("!expired:localhost").to_owned(), RoomTyping {
+			users: BTreeMap::from([(user_id!("@b:localhost").to_owned(), 1)]),
+			update: 8,
+		});
+		typing.insert(room_id!("!stopped:localhost").to_owned(), RoomTyping {
+			users: BTreeMap::new(),
+			update: 9,
+		});
+
+		assert_eq!(typing_rooms(&typing), [
+			room_id!("!expired:localhost").to_owned(),
+			room_id!("!live:localhost").to_owned(),
+		]);
+	}
 }

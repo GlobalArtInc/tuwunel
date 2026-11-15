@@ -4,9 +4,10 @@ use futures::FutureExt;
 use regex::Regex;
 
 use super::{
-	APPSERVICE_CAP, Api, Build, CacheSample, Condition, Counter, DynFamily, EnumFamily, Fastpath,
-	Gauge, Histogram, JournalKind, MAX_KEY_LEN, Metric, OTHER, Op, PROVIDER_CAP, Pass, Phase,
-	Registry, Reply, RocksSample, Scale, Section, SendResult, SinceKind, WatchPart, Writer,
+	APPSERVICE_CAP, Api, Build, BuildPath, CacheSample, Condition, Counter, DynFamily,
+	EnumFamily, Fastpath, Gauge, Histogram, JournalKind, MAX_KEY_LEN, Metric, OTHER, Op,
+	PROVIDER_CAP, Pass, Phase, Registry, Reply, RocksSample, Scale, Section, SendResult,
+	SinceKind, WatchPart, Writer,
 };
 use crate::label_set;
 
@@ -29,6 +30,7 @@ const ALLOWED_LABELS: &[&str] = &[
 	"since",
 	"outcome",
 	"fastpath",
+	"path",
 	"pass",
 	"phase",
 	"part",
@@ -848,6 +850,40 @@ fn sync_journal_is_counted_per_kind_and_its_size_is_a_gauge() {
 		"tuwunel_sync_journal_misses_total{kind=\"private_read\"} 1\n",
 		"tuwunel_sync_journal_misses_total{kind=\"device_lists\"} 1\n",
 		"tuwunel_sync_journal_misses_total{kind=\"timeline\"} 0\n",
+	] {
+		assert!(text.contains(line), "{line}\n{text}");
+	}
+
+	assert!(parsed.samples <= registry.max_series());
+}
+
+#[test]
+fn sync_v3_build_paths_and_candidates_are_counted() {
+	let registry = Registry::new();
+	let group = &registry.sync;
+
+	group.v3_build_path(BuildPath::Scan);
+	group.v3_build_path(BuildPath::Candidates);
+	group.v3_build_path(BuildPath::Scan);
+	group.v3_candidates_per_sync(3);
+	group.v3_candidates_per_sync(0);
+	group.candidates_miss();
+
+	assert_eq!(group.v3_build_paths_counted(BuildPath::Scan), 2);
+	assert_eq!(group.v3_build_paths_counted(BuildPath::Candidates), 1);
+	assert_eq!(group.v3_candidate_syncs(), 2);
+	assert_eq!(group.candidates_missed(), 1);
+
+	let text = registry.render();
+	let parsed = parse(&text);
+
+	for line in [
+		"tuwunel_sync_v3_build_paths_total{path=\"scan\"} 2\n",
+		"tuwunel_sync_v3_build_paths_total{path=\"candidates\"} 1\n",
+		"tuwunel_sync_v3_candidates_per_sync_bucket{le=\"0\"} 1\n",
+		"tuwunel_sync_v3_candidates_per_sync_bucket{le=\"5\"} 2\n",
+		"tuwunel_sync_v3_candidates_per_sync_count 2\n",
+		"tuwunel_sync_candidates_misses_total 1\n",
 	] {
 		assert!(text.contains(line), "{line}\n{text}");
 	}

@@ -112,6 +112,45 @@ pub struct Sync {
 	#[serde(default)]
 	pub fastpath_verify: bool,
 
+	/// Assembles the joined rooms of an incremental legacy sync from the rooms
+	/// the sync journal names, instead of walking every room of the account.
+	///
+	/// An account in thousands of rooms is otherwise walked room by room on
+	/// every build, although a handful changed. With this on, an incremental
+	/// sync (one with `since`, without `full_state`) takes the rooms that the
+	/// journal holds a change for after `since`, for the account or for every
+	/// user, plus the rooms where someone is typing now, since a typing
+	/// indicator expires only when its room is read. Those rooms are kept when
+	/// the account has joined them and the request's room filter matches, and
+	/// are then assembled as usual, so a room is answered as before. Rooms
+	/// outside that set are not read at all. Initial and `full_state` syncs,
+	/// and a request whose `since` lies below what the journal covers (after
+	/// a restart, say), walk every room as before, as does a server with
+	/// `journal_capacity` 0. A change the journal does not record would be
+	/// missed until the next change in its room, so run `candidates_verify`
+	/// first and check that `tuwunel_sync_candidates_misses_total` stays at 0.
+	/// Left rooms are not affected. `candidates_verify` takes precedence.
+	///
+	/// The journal and the probe of `fastpath` are separate: a candidate room
+	/// is assembled in full when `fastpath` is off.
+	///
+	/// reloadable: yes
+	#[serde(default)]
+	pub candidates: bool,
+
+	/// Checks the rooms `candidates` would take against a full walk, without
+	/// changing any response.
+	///
+	/// Legacy sync walks every room of the account as usual and answers from
+	/// that. In addition it works out the candidate rooms of `candidates`, and
+	/// a room the walk answered with changes that is not among them is logged
+	/// as an error and counted in `tuwunel_sync_candidates_misses_total`.
+	/// Takes precedence over `candidates`.
+	///
+	/// reloadable: yes
+	#[serde(default)]
+	pub candidates_verify: bool,
+
 	/// Joined-room count from which a legacy sync that has only presence to
 	/// report keeps waiting instead of answering.
 	///
@@ -206,6 +245,8 @@ impl Default for Sync {
 			calculate_heroes: true_fn(),
 			fastpath: false,
 			fastpath_verify: false,
+			candidates: false,
+			candidates_verify: false,
 			presence_only_min_rooms: 0,
 			journal_capacity: default_journal_capacity(),
 			initial_large_account_rooms: default_initial_large_account_rooms(),
