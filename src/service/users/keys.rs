@@ -143,6 +143,11 @@ pub async fn add_one_time_keys(
 	}
 
 	if let Some(count) = last_count {
+		self.services
+			.sync
+			.journal
+			.record_user(count, JournalKind::OneTimeKeys, user_id, None);
+
 		txn.raw_put(&self.db.userid_lastonetimekeyupdate, user_id, count);
 	}
 
@@ -241,6 +246,11 @@ where
 	}
 
 	if let Some(count) = last_count {
+		self.services
+			.sync
+			.journal
+			.record_user(count, JournalKind::OneTimeKeys, user_id, None);
+
 		txn.raw_put(&self.db.userid_lastonetimekeyupdate, user_id, count);
 	}
 
@@ -364,6 +374,14 @@ pub async fn take_one_time_key(
 	};
 
 	let update_count = self.services.globals.next_count();
+
+	self.services.sync.journal.record_user(
+		*update_count,
+		JournalKind::OneTimeKeys,
+		user_id,
+		None,
+	);
+
 	self.db
 		.userid_lastonetimekeyupdate
 		.insert(user_id, update_count.to_be_bytes());
@@ -1180,6 +1198,13 @@ pub async fn mark_device_key_update(
 	}
 
 	let user_key = (user_id, *count);
+
+	if local {
+		self.services
+			.sync
+			.journal
+			.record_user(*count, JournalKind::OwnKeys, user_id, None);
+	}
 
 	self.db
 		.keychangeid_userid

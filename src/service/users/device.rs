@@ -11,6 +11,7 @@ use ruma::{
 use serde_json::json;
 use tuwunel_core::{
 	Err, Error, Result, async_noinline, at, debug_warn, implement,
+	metrics::prom::JournalKind,
 	smallstr::SmallString,
 	smallvec::SmallVec,
 	trace,
@@ -996,6 +997,13 @@ pub fn add_to_device_event(
 	content: &serde_json::Value,
 ) -> u64 {
 	let count = self.services.globals.next_count();
+
+	self.services.sync.journal.record_user(
+		*count,
+		JournalKind::ToDevice,
+		target_user_id,
+		Some(target_device_id),
+	);
 
 	let key = (target_user_id, target_device_id, *count);
 	self.db.todeviceid_events.put(

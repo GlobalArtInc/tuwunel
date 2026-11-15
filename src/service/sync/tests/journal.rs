@@ -567,7 +567,7 @@ async fn an_announced_private_read_journals_its_room_for_its_user() -> Result {
 }
 
 #[tokio::test]
-async fn room_account_data_journals_for_its_owner_and_global_data_does_not() -> Result {
+async fn room_and_global_account_data_both_journal_for_their_owner() -> Result {
 	with_services(async |services| {
 		let account_data = &services.account_data;
 		let kind = RoomAccountDataEventType::from("m.test");
@@ -577,7 +577,7 @@ async fn room_account_data_journals_for_its_owner_and_global_data_does_not() -> 
 		account_data
 			.update(None, alice(), kind.clone(), &data)
 			.await?;
-		assert_eq!(services.sync.journal.len(), held);
+		assert_eq!(services.sync.journal.len(), held.saturating_add(1));
 
 		account_data
 			.update(Some(room()), alice(), kind, &data)

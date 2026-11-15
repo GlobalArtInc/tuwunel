@@ -26,6 +26,7 @@ use ruma::{
 };
 use tuwunel_core::{
 	Result, at, implement, is_not_empty,
+	metrics::prom::JournalKind,
 	utils::{
 		BoolExt, FutureBoolExt, OptionExt, ReadyExt,
 		future::ReadyBoolExt,
@@ -153,6 +154,17 @@ pub async fn update_membership(
 	let membership = membership_event.membership;
 
 	self.ensure_remote_user(user_id).await?;
+
+	if let PduCount::Normal(number) = count
+		&& self.services.globals.user_is_local(user_id)
+	{
+		self.services.sync.journal.record(
+			number,
+			JournalKind::Membership,
+			room_id,
+			Some(user_id),
+		);
+	}
 
 	match membership {
 		| MembershipState::Join => {

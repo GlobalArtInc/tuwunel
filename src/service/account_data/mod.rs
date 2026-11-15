@@ -141,6 +141,13 @@ pub async fn update(
 			room_id,
 			Some(user_id),
 		);
+	} else {
+		self.services.sync.journal.record_user(
+			*count,
+			JournalKind::GlobalAccountData,
+			user_id,
+			None,
+		);
 	}
 
 	let mut txn = self.services.db.txn();

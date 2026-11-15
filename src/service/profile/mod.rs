@@ -23,6 +23,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use tuwunel_core::{
 	Err, Result, err, implement,
+	metrics::prom::JournalKind,
 	smallvec::SmallVec,
 	utils::{
 		BoolExt, MutexMap, MutexMapGuard, ReadyExt,
@@ -773,12 +774,23 @@ where
 	}
 
 	let count = self.services.globals.next_count();
+
+	self.services
+		.sync
+		.journal
+		.record_user(*count, JournalKind::Profile, user_id, None);
+
 	let txn = self.stage_update(txn, user_id.as_str(), user_id, *count, logged);
 	let txn = if changed.is_empty() {
 		txn
 	} else {
 		rooms()
 			.ready_try_fold(txn, |txn, room_id| {
+				self.services
+					.sync
+					.journal
+					.record(*count, JournalKind::Profile, room_id, None);
+
 				Ok(self.stage_update(txn, room_id.as_str(), user_id, *count, changed))
 			})
 			.await?
