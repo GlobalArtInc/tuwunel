@@ -85,7 +85,7 @@ pub async fn wait_journal(
 				},
 				| Scan::Quiet => after = front,
 				| Scan::Resolve { rooms, overflow } =>
-					self.resolve(user, &mut memo, rooms, overflow)
+					self.resolve(user, &mut memo, rooms, overflow, true)
 						.await,
 			}
 		}
@@ -104,7 +104,9 @@ pub async fn wait_journal(
 /// when the journal no longer covers `after`.
 ///
 /// It reads what [`Self::wait_journal`] would find in one look and does not
-/// wait. The journal must be on, as for a wait.
+/// wait. The journal must be on, as for a wait. It is the shadow comparison of a
+/// wait and counts neither the entries it passes over nor the lookups it makes,
+/// so those counters measure the waits alone.
 #[implement(super::Service)]
 pub async fn journal_relevant(
 	&self,
@@ -118,13 +120,13 @@ pub async fn journal_relevant(
 	loop {
 		match self
 			.journal
-			.scan(user, device, after, upto, &memo, LIMIT)
+			.scan_silent(user, device, after, upto, &memo, LIMIT)
 		{
 			| Scan::Wake(_) => return Some(true),
 			| Scan::Quiet => return Some(false),
 			| Scan::Horizon(_) => return None,
 			| Scan::Resolve { rooms, overflow } =>
-				self.resolve(user, &mut memo, rooms, overflow)
+				self.resolve(user, &mut memo, rooms, overflow, false)
 					.await,
 		}
 	}
@@ -135,6 +137,9 @@ pub async fn journal_relevant(
 ///
 /// Each pass leaves the memo knowing at least one room it did not, or complete,
 /// so the passes over one window are bounded by the rooms in it.
+///
+/// The lookups are counted when `counted` is set, which a wait sets and the
+/// shadow comparison does not.
 #[implement(super::Service)]
 async fn resolve(
 	&self,
@@ -142,8 +147,11 @@ async fn resolve(
 	memo: &mut RoomMemo,
 	rooms: Vec<OwnedRoomId>,
 	overflow: bool,
+	counted: bool,
 ) {
-	let registry = self.services.server.metrics.prometheus();
+	let registry = counted
+		.then(|| self.services.server.metrics.prometheus())
+		.flatten();
 
 	if overflow {
 		let state_cache = &self.services.state_cache;

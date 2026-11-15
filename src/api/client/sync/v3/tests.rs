@@ -13,7 +13,7 @@ use ruma::{
 	serde::Raw,
 	uint,
 };
-use tuwunel_core::metrics::prom::{JournalKind, Registry};
+use tuwunel_core::metrics::prom::{JournalKind, Registry, Verdict as WaitVerdict};
 
 use super::{
 	Since, StateAfter, capped_timeline_limit,
@@ -28,7 +28,10 @@ use super::{
 		},
 	},
 	stale_since,
-	sync_events::{keep_joined, missed_rooms, presence_only, unaccounted_rooms, union_rooms},
+	sync_events::{
+		Wait, keep_joined, missed_rooms, presence_only, timeout_verdict, unaccounted_rooms,
+		union_rooms, woken_verdict,
+	},
 };
 
 const SINCE: u64 = 100;
@@ -591,4 +594,28 @@ fn a_room_changed_after_the_snapshot_is_no_miss_unless_the_live_journal_lacks_it
 	assert_eq!(unaccounted_rooms(&answered, &snapshot).len(), 2);
 	assert_eq!(missed_rooms(&answered, &snapshot, &live), [&room("!lost:localhost")]);
 	assert!(missed_rooms(&answered, &snapshot, &answered.keys().cloned().collect()).is_empty());
+}
+
+#[test]
+fn the_wait_follows_the_switches_and_only_a_journal_that_is_on() {
+	assert_eq!(Wait::select(true, false, false), Wait::Watchers);
+	assert_eq!(Wait::select(true, true, false), Wait::Journal);
+	assert_eq!(Wait::select(true, false, true), Wait::Verify);
+	assert_eq!(Wait::select(true, true, true), Wait::Verify);
+	assert_eq!(Wait::select(false, true, false), Wait::Watchers);
+	assert_eq!(Wait::select(false, true, true), Wait::Watchers);
+}
+
+#[test]
+fn a_woken_poll_is_a_miss_only_when_the_journal_is_silent_and_the_build_held_data() {
+	assert_eq!(woken_verdict(true, true), WaitVerdict::Both);
+	assert_eq!(woken_verdict(true, false), WaitVerdict::Both);
+	assert_eq!(woken_verdict(false, true), WaitVerdict::Miss);
+	assert_eq!(woken_verdict(false, false), WaitVerdict::WatcherSpurious);
+}
+
+#[test]
+fn a_poll_that_timed_out_is_judged_by_the_journal_alone() {
+	assert_eq!(timeout_verdict(true), WaitVerdict::JournalExtra);
+	assert_eq!(timeout_verdict(false), WaitVerdict::Quiet);
 }

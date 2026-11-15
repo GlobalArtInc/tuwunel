@@ -290,14 +290,58 @@ impl Journal {
 		memo: &RoomMemo,
 		limit: usize,
 	) -> Scan {
+		let (scan, walked) = self.look(user, device, after, upto, memo, limit);
+
+		self.walked(walked);
+
+		scan
+	}
+
+	/// Looks at a window as [`Self::scan`] does, and counts none of the entries it
+	/// passes over.
+	///
+	/// The shadow comparison of a wait reads the journal through it, so its cost
+	/// does not show in the counters of the wait itself.
+	#[must_use]
+	pub(super) fn scan_silent(
+		&self,
+		user: &UserId,
+		device: Option<&DeviceId>,
+		after: u64,
+		upto: u64,
+		memo: &RoomMemo,
+		limit: usize,
+	) -> Scan {
+		self.look(user, device, after, upto, memo, limit)
+			.0
+	}
+
+	/// Returns whether the journal records changes, which it does not at capacity
+	/// 0.
+	///
+	/// A wait on a journal that records nothing would never wake, so a caller
+	/// asks this of the journal itself, whose capacity is the one it started with,
+	/// and not of the configuration, which a reload can change.
+	#[must_use]
+	pub const fn is_on(&self) -> bool { self.capacity > 0 }
+
+	fn look(
+		&self,
+		user: &UserId,
+		device: Option<&DeviceId>,
+		after: u64,
+		upto: u64,
+		memo: &RoomMemo,
+		limit: usize,
+	) -> (Scan, u64) {
 		let state = self.read();
 
 		if after < state.horizon {
-			return Scan::Horizon(state.horizon);
+			return (Scan::Horizon(state.horizon), 0);
 		}
 
 		if after >= upto {
-			return Scan::Quiet;
+			return (Scan::Quiet, 0);
 		}
 
 		let mut unknown: Vec<OwnedRoomId> = Vec::new();
@@ -319,9 +363,7 @@ impl Journal {
 					.is_some_and(|target| Some(target) != device);
 
 				if owner == user && !other_device {
-					self.walked(walked);
-
-					return Scan::Wake(change.kind);
+					return (Scan::Wake(change.kind), walked);
 				}
 
 				continue;
@@ -332,11 +374,7 @@ impl Journal {
 			};
 
 			match memo.get(room) {
-				| Some(true) => {
-					self.walked(walked);
-
-					return Scan::Wake(change.kind);
-				},
+				| Some(true) => return (Scan::Wake(change.kind), walked),
 				| Some(false) => {},
 				| None if memo.complete => {},
 				| None =>
@@ -344,20 +382,16 @@ impl Journal {
 						unknown.push(room.to_owned());
 
 						if unknown.len() > limit {
-							self.walked(walked);
-
-							return Scan::Resolve { rooms: unknown, overflow: true };
+							return (Scan::Resolve { rooms: unknown, overflow: true }, walked);
 						}
 					},
 			}
 		}
 
-		self.walked(walked);
-
 		if unknown.is_empty() {
-			Scan::Quiet
+			(Scan::Quiet, walked)
 		} else {
-			Scan::Resolve { rooms: unknown, overflow: false }
+			(Scan::Resolve { rooms: unknown, overflow: false }, walked)
 		}
 	}
 

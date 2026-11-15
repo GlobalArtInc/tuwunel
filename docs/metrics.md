@@ -204,7 +204,8 @@ pass over, a window scanned again after a lookup counting again, and
 `tuwunel_sync_v3_wait_lookups_total` counts how they found out whether the account is
 in the room of an entry: `how` is `room` for one room looked up on its own, and `set`
 for the list of every room the account is in loaded in one pass, which a wait does
-once it meets more than 32 rooms it does not know.
+once it meets more than 32 rooms it does not know. Both count the waits alone: the
+shadow comparison of `journal_wait_verify` reads the journal without adding to them.
 
 `tuwunel_sync_v3_wait_verify_total` counts the verdicts of the shadow comparison of the
 sync journal with the database watchers, by `verdict`: `miss` means the journal would

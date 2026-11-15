@@ -326,6 +326,59 @@ async fn a_wait_counts_the_changes_it_passes_over() -> Result {
 }
 
 #[tokio::test]
+async fn journal_relevant_counts_neither_the_entries_nor_the_lookups_of_a_wait() -> Result {
+	with_services(async |services| {
+		let registry = services.server.metrics.enable_prometheus();
+
+		with_membership(services, home(), alice(), MembershipState::Join).await?;
+
+		let after = services.globals.wait_pending().await?;
+
+		journal_room(services, stranger());
+		journal_room(services, home());
+
+		let counted = registry.sync.wait_scanned_total();
+
+		assert_eq!(
+			services
+				.sync
+				.journal_relevant(alice(), None, after)
+				.await,
+			Some(true)
+		);
+		assert_eq!(registry.sync.wait_scanned_total(), counted);
+		assert_eq!(registry.sync.wait_lookups_total(Lookup::Room), 0);
+
+		let mut wait = pin!(services.sync.wait_journal(alice(), None, after));
+
+		assert_eq!(wakes(wait.as_mut()).await, Some(Woken::Journal(JournalKind::Timeline)));
+		assert!(registry.sync.wait_scanned_total() > counted);
+		assert_eq!(registry.sync.wait_lookups_total(Lookup::Room), 2);
+
+		let after = services.globals.wait_pending().await?;
+
+		for number in 0..STRANGER_ROOMS {
+			journal_room(services, &OwnedRoomId::try_from(format!("!room{number}:localhost"))?);
+		}
+
+		journal_room(services, home());
+
+		assert_eq!(
+			services
+				.sync
+				.journal_relevant(alice(), None, after)
+				.await,
+			Some(true)
+		);
+		assert_eq!(registry.sync.wait_lookups_total(Lookup::Set), 0);
+		assert_eq!(registry.sync.wait_lookups_total(Lookup::Room), 2);
+
+		Ok(())
+	})
+	.await
+}
+
+#[tokio::test]
 async fn changes_evicted_above_after_wake_with_the_horizon_once_the_counter_reaches_it() -> Result
 {
 	let config = Figment::new().merge(("client.sync.journal_capacity", 2));

@@ -30,23 +30,26 @@ use ruma::{
 	},
 	serde::Raw,
 };
-use tokio::time::timeout_at;
+use tokio::time::{Instant, timeout_at};
 use tuwunel_core::{
 	Result, at, debug,
 	debug::INFO_SPAN_LEVEL,
 	error,
 	error::inspect_log,
 	extract_variant,
-	metrics::prom::{Api, Build, BuildPath, Phase, Registry, Reply, Section, SinceKind},
+	metrics::prom::{
+		Api, Build, BuildPath, Phase, Registry, Reply, Section, SinceKind, Verdict, WakeReason,
+	},
 	trace,
 	utils::{
 		BoolExt, IterStream, ReadyExt, TryFutureExtExt,
 		option::OptionExt,
 		stream::{BroadbandExt, Tools},
 	},
+	warn,
 };
 use tuwunel_matrix::event::{Matches, matches_kind};
-use tuwunel_service::{Services, presence::Ping, users::InviteFilter};
+use tuwunel_service::{Services, presence::Ping, sync::Woken, users::InviteFilter};
 
 use super::{
 	super::{
@@ -76,6 +79,42 @@ struct Params<'a> {
 }
 
 type PresenceUpdates = HashMap<OwnedUserId, PresenceEventContent>;
+
+/// How the long poll of one loop iteration waits for the next change.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Wait {
+	/// Database watchers, registered before the build.
+	Watchers,
+
+	/// The sync journal, with no watcher registered.
+	Journal,
+
+	/// Database watchers, with the journal asked afterwards whether it would
+	/// have woken the poll.
+	Verify,
+}
+
+impl Wait {
+	fn current(services: &Services) -> Self {
+		let sync = &services.config.client.sync;
+
+		Self::select(services.sync.journal.is_on(), sync.journal_wait, sync.journal_wait_verify)
+	}
+
+	pub(super) fn select(journal_on: bool, wait: bool, verify: bool) -> Self {
+		if !journal_on {
+			Self::Watchers
+		} else if verify {
+			Self::Verify
+		} else if wait {
+			Self::Journal
+		} else {
+			Self::Watchers
+		}
+	}
+
+	fn registers(self) -> bool { self != Self::Journal }
+}
 
 /// # `GET /_matrix/client/r0/sync`
 ///
@@ -122,6 +161,7 @@ type PresenceUpdates = HashMap<OwnedUserId, PresenceEventContent>;
 		device_id = %body.sender_device.as_deref().map_or("<no device>", |x| x.as_str()),
     )
 )]
+#[expect(clippy::too_many_lines)]
 pub(crate) async fn sync_events_route(
 	State(services): State<crate::State>,
 	ClientIp(client): ClientIp,
@@ -230,19 +270,32 @@ pub(crate) async fn sync_events_route(
 		};
 
 	let mut presence_only_account: Option<bool> = None;
+	let mut woke_after: Option<u64> = None;
 
 	let stop_at = sync_deadline(&services, body.body.timeout);
 
 	loop {
-		let watch_rooms = services
-			.state_cache
-			.rooms_joined(sender_user)
-			.chain(services.state_cache.rooms_invited(sender_user));
+		let wait = Wait::current(&services);
 
-		let watchers = services
-			.sync
-			.watch(sender_user, sender_device, watch_rooms)
-			.await;
+		if wait != Wait::Verify {
+			woke_after = None;
+		}
+
+		let watchers = if wait.registers() {
+			let watch_rooms = services
+				.state_cache
+				.rooms_joined(sender_user)
+				.chain(services.state_cache.rooms_invited(sender_user));
+
+			Some(
+				services
+					.sync
+					.watch(sender_user, sender_device, watch_rooms)
+					.await,
+			)
+		} else {
+			None
+		};
 
 		let next_batch = services.globals.wait_pending().await?;
 		if since.is_some_and(|since| since > next_batch) {
@@ -278,22 +331,45 @@ pub(crate) async fn sync_events_route(
 
 			count_build(registry, empty, held);
 
+			if let Some(after) = woke_after.take() {
+				verify_woken(
+					&services,
+					sender_user,
+					sender_device,
+					after,
+					next_batch,
+					Some(&response),
+				)
+				.await;
+			}
+
 			if (!empty && !held) || full_state {
 				answered(Reply::Data);
 				count_sections(registry, &response);
 
 				return Ok(response);
 			}
+		} else if let Some(after) = woke_after.take() {
+			verify_woken(&services, sender_user, sender_device, after, next_batch, None).await;
 		}
 
 		// Wait for activity
 		let timed_out = {
 			let _long_poll = long_poll(&services, Api::V3);
 
-			timeout_at(stop_at, watchers).await.is_err()
+			match watchers {
+				| Some(watchers) => timeout_at(stop_at, watchers).await.is_err(),
+				| None =>
+					wait_on_journal(&services, sender_user, sender_device, next_batch, stop_at)
+						.await,
+			}
 		};
 
 		if timed_out || services.server.is_stopping() {
+			if timed_out && wait == Wait::Verify {
+				verify_timeout(&services, sender_user, sender_device, next_batch).await;
+			}
+
 			let response =
 				build_empty_response(&services, sender_user, sender_device, next_batch).await;
 
@@ -312,6 +388,147 @@ pub(crate) async fn sync_events_route(
 		);
 
 		since = Some(next_batch);
+		woke_after = (wait == Wait::Verify).then_some(next_batch);
+	}
+}
+
+/// Waits through the sync journal for a change after `next_batch` that
+/// concerns the user, and counts why the wait ended.
+///
+/// Returns whether the poll must end with an empty response: its time ran out or
+/// the server is stopping. A journal that dropped changes ends the wait too, but
+/// that is a reason to build again from `next_batch`, which then starts at or
+/// above the journal's horizon.
+async fn wait_on_journal(
+	services: &Services,
+	sender_user: &UserId,
+	sender_device: Option<&DeviceId>,
+	next_batch: u64,
+	stop_at: Instant,
+) -> bool {
+	let woken = timeout_at(
+		stop_at,
+		services
+			.sync
+			.wait_journal(sender_user, sender_device, next_batch),
+	)
+	.await;
+
+	let reason = match woken {
+		| Ok(Woken::Journal(_)) => WakeReason::Journal,
+		| Ok(Woken::Horizon) => WakeReason::Horizon,
+		| Ok(Woken::Shutdown) => WakeReason::Shutdown,
+		| Err(_) => WakeReason::Timeout,
+	};
+
+	if let Some(registry) = services.server.metrics.prometheus() {
+		registry.sync.wait_woken(reason);
+	}
+
+	matches!(reason, WakeReason::Timeout | WakeReason::Shutdown)
+}
+
+/// Compares a build that followed a wake of the database watchers with the
+/// journal, and counts the verdict.
+///
+/// The journal is asked after the build, so every change the build could have
+/// seen is in it. `after` is the position the wait began from, which is the
+/// `since` of the build. `response` is `None` when nothing was built because
+/// `since` already was the position the build would have ended at.
+async fn verify_woken(
+	services: &Services,
+	sender_user: &UserId,
+	sender_device: Option<&DeviceId>,
+	after: u64,
+	next_batch: u64,
+	response: Option<&Response>,
+) {
+	let Some(relevant) = journal_relevant(services, sender_user, sender_device, after).await
+	else {
+		return;
+	};
+
+	let verdict = woken_verdict(
+		relevant,
+		response.is_some_and(|response| !none_apart_from_presence(response)),
+	);
+
+	if verdict == Verdict::Miss {
+		warn!(
+			target: "tuwunel_api_client::sync::v3",
+			user_id = %sender_user,
+			device_id = ?sender_device,
+			after,
+			next_batch,
+			sections = ?response.map(filled_sections).unwrap_or_default(),
+			"sync journal miss, the database watchers woke a long poll that the journal would \
+			 have left asleep"
+		);
+	}
+
+	if let Some(registry) = services.server.metrics.prometheus() {
+		registry.sync.wait_verified(verdict);
+	}
+}
+
+/// Compares a long poll that ran out of time with the journal, and counts the
+/// verdict.
+///
+/// The window is the one the wait covered, from the `next_batch` it began at.
+async fn verify_timeout(
+	services: &Services,
+	sender_user: &UserId,
+	sender_device: Option<&DeviceId>,
+	next_batch: u64,
+) {
+	let Some(relevant) = journal_relevant(services, sender_user, sender_device, next_batch).await
+	else {
+		return;
+	};
+
+	if let Some(registry) = services.server.metrics.prometheus() {
+		registry
+			.sync
+			.wait_verified(timeout_verdict(relevant));
+	}
+}
+
+async fn journal_relevant(
+	services: &Services,
+	sender_user: &UserId,
+	sender_device: Option<&DeviceId>,
+	after: u64,
+) -> Option<bool> {
+	let relevant = services
+		.sync
+		.journal_relevant(sender_user, sender_device, after)
+		.await;
+
+	if relevant.is_none() {
+		debug!(
+			target: "tuwunel_api_client::sync::v3",
+			user_id = %sender_user,
+			after,
+			"sync journal wait verification skipped, the journal no longer covers after"
+		);
+	}
+
+	relevant
+}
+
+pub(super) fn woken_verdict(relevant: bool, data: bool) -> Verdict {
+	match (relevant, data) {
+		| (true, _) => Verdict::Both,
+		| (false, true) => Verdict::Miss,
+		| (false, false) => Verdict::WatcherSpurious,
+	}
+}
+
+pub(super) fn timeout_verdict(relevant: bool) -> Verdict {
+	if relevant {
+		Verdict::JournalExtra
+	} else {
+		Verdict::Quiet
 	}
 }
 
@@ -395,8 +612,17 @@ fn count_sections(registry: Option<&Registry>, response: &Response) {
 		return;
 	};
 
+	for (section, present) in sections(response) {
+		if present {
+			registry.sync.v3_section(section);
+		}
+	}
+}
+
+fn sections(response: &Response) -> [(Section, bool); 6] {
 	let rooms = &response.rooms;
-	let sections = [
+
+	[
 		(
 			Section::Rooms,
 			!rooms.join.is_empty()
@@ -409,13 +635,14 @@ fn count_sections(registry: Option<&Registry>, response: &Response) {
 		(Section::DeviceLists, !response.device_lists.is_empty()),
 		(Section::ToDevice, !response.to_device.is_empty()),
 		(Section::Users, !response.users.is_empty()),
-	];
+	]
+}
 
-	for (section, present) in sections {
-		if present {
-			registry.sync.v3_section(section);
-		}
-	}
+fn filled_sections(response: &Response) -> Vec<Section> {
+	sections(response)
+		.into_iter()
+		.filter_map(|(section, present)| present.then_some(section))
+		.collect()
 }
 
 async fn initial_capped_filter(
