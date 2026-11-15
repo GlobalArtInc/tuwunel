@@ -1,0 +1,208 @@
+# Metrics
+
+Tuwunel can serve its own measurements in the Prometheus text format
+(version 0.0.4). The endpoint is off by default. When it is off nothing is
+recorded and no port is opened.
+
+## Enabling
+
+```toml
+[global.metrics]
+enable = true
+address = "127.0.0.1"
+port = 9149
+bearer_token_file = "/etc/tuwunel/.metrics_token"
+```
+
+The same settings can be given as `TUWUNEL_METRICS__ENABLE=true`,
+`TUWUNEL_METRICS__ADDRESS=0.0.0.0` and so on. `enable`, `address` and `port` are
+read once at startup, so restart the server after changing them. The remaining
+settings can be reloaded.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `enable` | `false` | Open the listener, record measurements and start the collector. |
+| `address` | `127.0.0.1` | Address the metrics listener binds to. |
+| `port` | `9149` | TCP port of the listener. Startup fails if it is taken or equals a port of `http.listen` on the same address. |
+| `bearer_token` | none | Require `Authorization: Bearer <token>`. Mutually exclusive with `bearer_token_file`. |
+| `bearer_token_file` | none | Read the token from a file, at most once a second, so a rotated token applies without a restart. |
+| `collect_interval` | `15` | Seconds between samples of cheap gauges (process, runtime, caches, RocksDB). At least 1. |
+| `count_interval` | `300` | Seconds between counting scans, or `0` to turn them off. |
+
+The endpoint is `GET /metrics` on its own listener. It is not served on the
+client or federation listeners.
+
+## Security
+
+- The listener speaks plain HTTP. A bearer token travels in the clear, so it
+  protects against casual access, not against anyone who can read the traffic.
+- With no token the endpoint answers everyone who can reach it. Keep it on
+  loopback, or restrict who can reach it with a firewall or, in Kubernetes, a
+  `NetworkPolicy`, whenever `address` is `0.0.0.0` or `::`.
+- Do not publish the port through a reverse proxy or an ingress.
+- Labels never carry user, room, device or server identifiers. Request routes
+  are route templates, never paths with identifiers in them.
+- The number of series is bounded, so the output does not grow with traffic.
+
+## Scraping
+
+Prometheus:
+
+```yaml
+scrape_configs:
+  - job_name: tuwunel
+    scrape_interval: 15s
+    authorization:
+      credentials_file: /etc/prometheus/tuwunel-metrics-token
+    static_configs:
+      - targets: ["tuwunel:9149"]
+```
+
+Grafana Alloy:
+
+```alloy
+prometheus.scrape "tuwunel" {
+  targets         = [{ "__address__" = "tuwunel:9149" }]
+  scrape_interval = "15s"
+  authorization {
+    type             = "Bearer"
+    credentials_file = "/etc/alloy/tuwunel-metrics-token"
+  }
+  forward_to = [prometheus.remote_write.default.receiver]
+}
+```
+
+## What is exposed
+
+Every name starts with `tuwunel_` except the standard `process_` ones.
+
+### Requests
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `tuwunel_http_requests_total` | counter | `route`, `method`, `status` |
+| `tuwunel_http_request_duration_seconds` | histogram | `route`, `method` |
+| `tuwunel_http_requests_in_flight` | gauge | `route` |
+
+`status` is a class (`1xx` to `5xx`) or `aborted` for a request dropped before
+it produced a response. A request that no route served has the route
+`_unmatched` and the method `other`. A route or method beyond the series cap
+shares the `_other` series.
+
+### Sync
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `tuwunel_sync_long_polls` | gauge | `api` |
+| `tuwunel_sync_response_size_bytes` | histogram | `api` |
+| `tuwunel_sync_v3_build_seconds` | histogram | `since` |
+| `tuwunel_sync_v3_responses_total` | counter | `since`, `outcome` |
+| `tuwunel_sync_v3_rooms_total` | counter | `fastpath` |
+| `tuwunel_sync_v3_rooms_per_sync` | histogram | none |
+| `tuwunel_sync_fastpath_mismatches_total` | counter | none |
+| `tuwunel_sync_v5_pass_seconds` | histogram | `pass` |
+| `tuwunel_sync_v5_response_rooms` | histogram | none |
+| `tuwunel_sync_v5_unknown_pos_total` | counter | none |
+| `tuwunel_sync_v5_connections_loaded` | gauge | none |
+| `tuwunel_sync_v5_connections_stored` | gauge | none |
+| `tuwunel_sync_v5_connection_state_bytes` | histogram | none |
+| `tuwunel_sync_v5_store_bytes` | gauge | none |
+| `tuwunel_timeline_last_normal_entries` | gauge | none |
+
+`api` is `v3` or `v5`. `since` is `initial` or `incremental`. `pass` is `first`
+for the opening pass of a sliding sync request and `woken` for a pass after the
+watchers fired. `tuwunel_sync_fastpath_mismatches_total` should stay at zero; a
+nonzero value means the fast path disagreed with the full computation.
+`tuwunel_sync_v5_connection_state_bytes` leaves out the empty state stored when
+a client resets its connection.
+
+### Database
+
+| Metric | Type |
+| --- | --- |
+| `tuwunel_db_pool_workers`, `tuwunel_db_pool_queued` | gauge |
+| `tuwunel_rocksdb_block_cache_usage_bytes`, `_pinned_bytes`, `_capacity_bytes` | gauge, label `pool` |
+| `tuwunel_rocksdb_row_cache_usage_bytes`, `_capacity_bytes` | gauge |
+| `tuwunel_rocksdb_memtable_bytes`, `_pending_compaction_bytes`, `_sst_bytes`, `_wal_bytes` | gauge |
+| `tuwunel_rocksdb_running_compactions`, `_running_flushes` | gauge |
+| `tuwunel_rocksdb_write_stopped`, `_delayed_write_rate_bytes` | gauge |
+| `tuwunel_rocksdb_sst_files` | gauge, counted every `count_interval` |
+| `tuwunel_rocksdb_compactions_total`, `_flushes_total`, `_background_errors_total` | counter |
+| `tuwunel_rocksdb_stall_changes_total` | counter, label `condition` (`normal`, `delayed`, `stopped`) |
+
+`tuwunel_db_pool_workers` counts the threads the pool started, not the busy
+ones. Properties are summed over column families, so no series carries a column
+family name. `tuwunel_rocksdb_write_stopped` at 1 or a growing
+`_pending_compaction_bytes` are the first signs of a stalled database.
+
+### Inventory
+
+| Metric | Type |
+| --- | --- |
+| `tuwunel_users_registered` | gauge |
+| `tuwunel_rooms_known` | gauge |
+| `tuwunel_devices` | gauge |
+
+These come from the counting scan, which walks the keys of a table. The first
+scan runs one `count_interval` after startup, so the series are absent until
+then. `tuwunel_users_registered` counts the rows of the password table: every
+account, including deactivated ones, the server user and the users of
+appservices.
+
+### Appservices
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `tuwunel_appservice_transactions_total` | counter | `appservice`, `result` |
+| `tuwunel_appservice_transaction_seconds` | histogram | `appservice` |
+| `tuwunel_appservice_ping_total` | counter | `appservice`, `result` |
+| `tuwunel_appservice_queued_events` | gauge | `appservice` |
+
+`appservice` is the registration id chosen by the operator; ids beyond the series
+cap share `_other`, and the queue gauge of that series is their sum. `result` is
+`ok`, `timeout`, `network`, `bad_response` or `other`. Each attempt is counted,
+so a retry is another attempt. A timeout while reading the body, and a
+transaction request that could not be built, count as `bad_response`; a ping
+request that could not be built counts as `other`.
+`tuwunel_appservice_queued_events` is refreshed by the counting scan, counts up
+to a ceiling and leaves out the transaction in flight. An appservice that is no
+longer registered drops to zero once.
+
+### Storage providers
+
+`tuwunel_storage_operations_total{provider, op, result}` and
+`tuwunel_storage_operation_seconds{provider, op}` cover the object-store
+providers used for media and backups. `op` is one of `get`, `put`, `delete`,
+`head`, `copy`, `rename`; `result` is `ok` or `error`. A read is timed until the
+object is opened, an upload only for the time spent in calls to the backend
+(not waiting for input), and deletes are counted but not timed.
+
+### Process and runtime
+
+`process_resident_memory_bytes`, `process_cpu_seconds_total`,
+`process_threads`, `process_open_fds`, `process_max_fds` and
+`process_start_time_seconds` come from `/proc` on Linux and are absent on other
+systems. `process_max_fds` is left out when the limit is unlimited.
+`tuwunel_tokio_workers`, `tuwunel_tokio_alive_tasks`,
+`tuwunel_tokio_global_queue_depth`, `tuwunel_tokio_busy_seconds_total` and
+`tuwunel_tokio_parks_total` describe the async runtime. `tuwunel_build_info`
+is always 1 and carries the version in a label.
+
+### The metrics themselves
+
+`tuwunel_metrics_series_overflow_total{family}` counts label values that did not
+get a series of their own because a family reached its cap. It should stay at
+zero; an alert on any increase catches a route table or an appservice list that
+outgrew the ceiling. The whole output stays below about 25000 series.
+
+## Caveats
+
+- A request dropped before a response is counted as `aborted` and timed up to the
+  drop. A mutating request that continues in the background after the client has
+  gone away has its final status lost.
+- Counting scans read the database without filling the block cache and hand the
+  thread back every thousand keys, but on a very large database they still cost
+  CPU and read I/O every `count_interval`. Raise the interval or set it to `0`
+  if that matters.
+- Recording a request costs on the order of 150 ns, and a scrape reads atomics
+  without touching the database.

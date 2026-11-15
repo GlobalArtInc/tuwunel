@@ -60,6 +60,7 @@
 
 - [Backup and Recovery](backups.md)
 - [Maintenance](maintenance.md)
+- [Metrics](metrics.md)
 - [Troubleshooting](troubleshooting.md)
 
 # Engineering
