@@ -10,7 +10,7 @@ use tuwunel_core::{Error, Result, metrics::prom::SendResult};
 use super::{
 	SendingFutures, TransactionStatus, WakeQueue, completion, enqueue, fixture::fixture, pdu_id,
 };
-use crate::sending::{Destination, SendingEvent, sender::dispatch::appservice::classify};
+use crate::sending::{Destination, SendingEvent, sender::dispatch::classify};
 
 #[tokio::test]
 async fn missing_appservice_registration_retries_on_its_timer_and_preserves_rows() -> Result {
@@ -233,6 +233,7 @@ async fn failed_requests_are_classified_by_how_they_failed() {
 
 	let url = format!("http://{}/", listener.local_addr().expect("local address"));
 	let silent = reqwest::Client::builder()
+		.no_proxy()
 		.timeout(Duration::from_millis(100))
 		.build()
 		.expect("client");

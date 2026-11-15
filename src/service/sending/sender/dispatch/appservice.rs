@@ -224,9 +224,10 @@ fn send_result<T>(sent: &Result<Option<T>>) -> Option<SendResult> {
 /// Classifies a failed request to an appservice.
 ///
 /// Transport errors split into timeouts and the rest. Every other failure of
-/// the request is a bad response: a status outside 2xx, an unreadable body, or
-/// one that does not parse. They are not told apart here because the request
-/// reports them all alike.
+/// the request is a bad response: a status outside 2xx, an unreadable body
+/// (including a timeout while reading it), one that does not parse, or a
+/// request that could not be built. They are not told apart here because the
+/// request reports them all alike.
 pub(in crate::sending::sender) fn classify(error: &Error) -> SendResult {
 	match error {
 		| Error::Reqwest(e) if e.is_timeout() => SendResult::Timeout,

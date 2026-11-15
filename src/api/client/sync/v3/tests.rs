@@ -404,20 +404,34 @@ fn every_fastpath_verdict_has_its_own_label() {
 		Verdict::Busy(Busy::Error),
 	];
 
-	let registry = Registry::new();
+	let mut counted = Vec::new();
 	for verdict in verdicts {
+		let registry = Registry::new();
 		registry.sync.v3_rooms(verdict.label(), 1);
+
+		let text = registry.render();
+		let rows = text
+			.lines()
+			.filter(|line| line.starts_with("tuwunel_sync_v3_rooms_total{"))
+			.collect::<Vec<_>>();
+
+		let ones = rows
+			.iter()
+			.filter(|line| line.ends_with(" 1"))
+			.collect::<Vec<_>>();
+
+		assert_eq!(ones.len(), 1, "{verdict:?} must count in exactly one series: {rows:?}");
+		assert!(
+			rows.iter()
+				.all(|line| line.ends_with(" 1") || line.ends_with(" 0")),
+			"{verdict:?} must leave the other series at zero: {rows:?}"
+		);
+
+		counted.push((*ones[0]).to_owned());
 	}
 
-	let text = registry.render();
-	let counted = text
-		.lines()
-		.filter(|line| line.starts_with("tuwunel_sync_v3_rooms_total{"))
-		.collect::<Vec<_>>();
+	counted.sort_unstable();
+	counted.dedup();
 
-	assert_eq!(counted.len(), verdicts.len(), "a label is shared or missing: {counted:?}");
-	assert!(
-		counted.iter().all(|line| line.ends_with(" 1")),
-		"each verdict counts in its own series: {counted:?}"
-	);
+	assert_eq!(counted.len(), verdicts.len(), "two verdicts share a label: {counted:?}");
 }

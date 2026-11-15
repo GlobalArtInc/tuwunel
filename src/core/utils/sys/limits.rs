@@ -233,3 +233,18 @@ pub fn page_size() -> Result<usize> {
 /// Get the system's page size in bytes.
 #[inline]
 pub fn page_size() -> Result<usize> { Ok(4096) }
+
+#[cfg(unix)]
+/// Get the clock ticks per second that process CPU times are counted in.
+#[inline]
+pub fn clock_ticks() -> Result<u64> {
+	sysconf(SysconfVar::CLK_TCK)?
+		.unwrap_or(-1)
+		.try_into()
+		.map_err(Into::into)
+}
+
+#[cfg(not(unix))]
+/// Get the clock ticks per second that process CPU times are counted in.
+#[inline]
+pub fn clock_ticks() -> Result<u64> { Ok(100) }

@@ -1,11 +1,3 @@
-//! Prometheus registry on relaxed atomics.
-//!
-//! The registry is a static structure of named groups, one file per group.
-//! Metrics are counters, gauges and histograms with fixed buckets; labels come
-//! from closed enums or from open sets with a ceiling on the number of series.
-//! Reading takes no locks beyond short read locks on open families, and the
-//! text format is Prometheus 0.0.4.
-
 mod appservice;
 mod family;
 mod http;

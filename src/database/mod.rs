@@ -103,6 +103,10 @@ impl Database {
 	/// collector. Blocking; see [`Engine::metrics_snapshot`].
 	pub fn metrics_snapshot(&self) -> MetricsSnapshot { self.engine.metrics_snapshot() }
 
+	/// Counts the live SST files of the engine for the metrics collector.
+	/// Blocking; see [`Engine::sst_file_count`].
+	pub fn sst_file_count(&self) -> Result<u64> { self.engine.sst_file_count() }
+
 	#[inline]
 	/// Retrieves a configured map by name.
 	///

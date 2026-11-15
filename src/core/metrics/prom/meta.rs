@@ -1,5 +1,3 @@
-//! Metrics about the build and about the registry itself.
-
 use super::write::{Kind, Value, Writer, push_label};
 use crate::info::version::version;
 

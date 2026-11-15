@@ -34,6 +34,7 @@ mod tests;
 use std::{
 	iter::{from_fn, once},
 	ops::Range,
+	pin::pin,
 	sync::Arc,
 	time::{Duration, Instant},
 };
@@ -55,7 +56,7 @@ use tuwunel_core::{
 	debug, err, error,
 	error::error_chain,
 	extract_variant, implement, info,
-	metrics::prom::Op,
+	metrics::prom::{Op, Registry},
 	trace,
 	utils::{
 		BoolExt,
@@ -161,9 +162,7 @@ where
 	PutPayload: From<T> + From<PutPayload>,
 {
 	if size.is_none_or(|size| size >= self.multipart_threshold()) {
-		return self
-			.measured(Op::Put, self.put_multi(path, input))
-			.await;
+		return self.put_multi(path, input).await;
 	}
 
 	debug!(
@@ -216,14 +215,16 @@ where
 		"Selecting multi-part upload..."
 	);
 
-	self.measured(Op::Put, self.put_multi(path, chunked(payload, part_size).try_stream()))
+	self.put_multi(path, chunked(payload, part_size).try_stream())
 		.await
 }
 
 /// Stores streamed input through a multipart upload.
 ///
 /// Input chunks are written as ordered multipart parts. Upload cleanup and
-/// backend failures are delegated to the object-store implementation.
+/// backend failures are delegated to the object-store implementation. The
+/// upload is measured as one operation lasting as long as its calls to the
+/// backend took, so the time spent waiting for the input is left out.
 #[implement(Provider)]
 #[tracing::instrument(
 	level = "debug",
@@ -240,43 +241,63 @@ where
 	PutPayload: From<T> + From<PutPayload>,
 {
 	let path = self.to_abs_path(path)?;
-	let mut handle = self
-		.provider
-		.put_multipart(&path)
-		.map_err(Error::from)
-		.await?;
+	let mut backend = Duration::ZERO;
+	let result = self.upload(&path, input, &mut backend).await;
 
-	match input
-		.try_for_each(|t| handle.put_part(t.into()).map_err(Error::from))
+	self.record(Op::Put, result.is_ok(), backend);
+
+	result
+}
+
+/// Writes streamed input as multipart parts and adds the time of each call to
+/// the backend to `backend`.
+#[implement(Provider)]
+async fn upload<S, T>(&self, path: &Path, input: S, backend: &mut Duration) -> Result<PutResult>
+where
+	S: Stream<Item = Result<T>> + Send,
+	PutPayload: From<T> + From<PutPayload>,
+{
+	let mut handle = timed(backend, self.provider.put_multipart(path))
+		.await
+		.map_err(Error::from)?;
+
+	let parts = async {
+		let mut input = pin!(input);
+		while let Some(part) = input.try_next().await? {
+			timed(backend, handle.put_part(part.into()))
+				.await
+				.map_err(Error::from)?;
+		}
+
+		Ok::<(), Error>(())
+	};
+
+	match parts
 		.inspect_err(|e| error!(?path, chain = %error_chain(e), "Failed to store object"))
 		.await
 	{
-		| Ok(()) =>
-			handle
-				.complete()
-				.map_err(Error::from)
-				.inspect_err(|e| {
-					error!(
-						?path,
-						chain = %error_chain(e),
-						"Failed to store object during completion",
-					);
-				})
-				.await,
+		| Ok(()) => timed(backend, handle.complete())
+			.await
+			.map_err(Error::from)
+			.inspect_err(|e| {
+				error!(
+					?path,
+					chain = %error_chain(e),
+					"Failed to store object during completion",
+				);
+			}),
 
-		| Err(e) =>
-			handle
-				.abort()
-				.map_ok(|()| Err(e))
-				.map_err(Error::from)
-				.inspect_err(|e| {
-					error!(
-						?path,
-						chain = %error_chain(e),
-						"Additional errors during error handling",
-					);
-				})
-				.await?,
+		| Err(e) => timed(backend, handle.abort())
+			.await
+			.map(|()| Err(e))
+			.map_err(Error::from)
+			.inspect_err(|e| {
+				error!(
+					?path,
+					chain = %error_chain(e),
+					"Additional errors during error handling",
+				);
+			})?,
 	}
 }
 
@@ -475,7 +496,8 @@ pub async fn delete_one(self: &Arc<Self>, path: &str) -> Result {
 /// Lazily deletes each supplied object path.
 ///
 /// The provider prefix is applied to every path before it reaches the backend.
-/// Invalid paths and backend failures are emitted by the returned stream.
+/// Invalid paths and backend failures are emitted by the returned stream. Only
+/// calls to the backend are measured, so an invalid path is not counted.
 #[implement(Provider)]
 #[tracing::instrument(
 	level = "debug",
@@ -506,7 +528,11 @@ where
 	self.provider
 		.delete_stream(paths)
 		.map_err(Error::from)
-		.inspect(move |result| counted.count(Op::Delete, result.is_ok()))
+		.inspect(move |result| {
+			if !is_unparsed_path(result) {
+				counted.count(Op::Delete, result.is_ok());
+			}
+		})
 }
 
 /// Renames an object within this provider.
@@ -651,26 +677,57 @@ pub async fn ping(&self) -> Result {
 /// A call whose future is dropped before it finishes is not recorded.
 #[implement(Provider)]
 async fn measured<T>(&self, op: Op, call: impl Future<Output = Result<T>>) -> Result<T> {
-	let Some(registry) = self.services.server.metrics.prometheus() else {
-		return call.await;
-	};
+	let mut elapsed = Duration::ZERO;
+	let result = timed(&mut elapsed, call).await;
 
-	let started = Instant::now();
-	let result = call.await;
-
-	registry
-		.storage
-		.timed(&self.name, op, result.is_ok(), started.elapsed());
+	self.record(op, result.is_ok(), elapsed);
 
 	result
+}
+
+/// Records an operation of the given duration while metrics are on.
+#[implement(Provider)]
+fn record(&self, op: Op, ok: bool, elapsed: Duration) {
+	if let Some(registry) = self.registry() {
+		registry
+			.storage
+			.timed(&self.name, op, ok, elapsed);
+	}
 }
 
 /// Counts an operation that is not timed, while metrics are on.
 #[implement(Provider)]
 fn count(&self, op: Op, ok: bool) {
-	if let Some(registry) = self.services.server.metrics.prometheus() {
+	if let Some(registry) = self.registry() {
 		registry.storage.counted(&self.name, op, ok);
 	}
+}
+
+/// Returns the registry while metrics are on, and `None` before the services
+/// are initialized.
+#[implement(Provider)]
+fn registry(&self) -> Option<&Registry> {
+	self.services
+		.try_get()?
+		.server
+		.metrics
+		.prometheus()
+}
+
+/// Awaits `call` and adds the time it took to `spent`.
+async fn timed<T>(spent: &mut Duration, call: impl Future<Output = T>) -> T {
+	let started = Instant::now();
+	let output = call.await;
+
+	*spent = spent.saturating_add(started.elapsed());
+
+	output
+}
+
+/// Returns whether a delete failed because its path did not parse, which the
+/// backend never saw.
+fn is_unparsed_path<T>(result: &Result<T>) -> bool {
+	matches!(result, Err(Error::ObjectStore(object_store::Error::InvalidPath { .. })))
 }
 
 #[implement(Provider)]

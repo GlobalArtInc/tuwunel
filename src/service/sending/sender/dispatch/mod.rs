@@ -1,10 +1,12 @@
-pub(super) mod appservice;
+mod appservice;
 mod federation;
 mod push;
 
 use futures::{FutureExt, future::BoxFuture};
 use tuwunel_core::{Error, Result, implement};
 
+#[cfg(test)]
+pub(super) use self::appservice::classify;
 use super::split::Split;
 use crate::sending::{
 	Destination, Service,

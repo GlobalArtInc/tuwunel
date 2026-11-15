@@ -494,7 +494,7 @@ fn appservice_delivery_is_counted_per_appservice_and_capped() {
 	group.transaction("bridge", SendResult::Ok, Duration::from_millis(30));
 	group.transaction("bridge", SendResult::Timeout, Duration::from_secs(40));
 	group.ping("bridge", SendResult::BadResponse);
-	group.set_queued("bridge", 7);
+	group.set_queued(&[("bridge", 7)]);
 
 	for index in 0..APPSERVICE_CAP.saturating_add(10) {
 		group.ping(&format!("as{index}"), SendResult::Ok);

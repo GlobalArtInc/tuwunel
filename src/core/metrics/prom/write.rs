@@ -1,5 +1,3 @@
-//! Text exposition writer for the Prometheus 0.0.4 format.
-
 /// Prometheus metric type announced in the `# TYPE` line.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Kind {

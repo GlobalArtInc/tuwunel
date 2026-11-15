@@ -349,6 +349,10 @@ pub async fn load_connection(&self, key: &ConnectionKey) -> Result<ConnectionVal
 /// A connection dropped, or replaced by a newer load, while a request held it
 /// is not stored again. The check and the write hold the one server-wide cache
 /// lock, so no drop falls between them and every store briefly waits on it.
+///
+/// A connection that has not answered yet, which is the empty state stored when
+/// a client resets its connection, is written but left out of the size
+/// histogram, so the histogram describes connections that carry state.
 #[implement(Service)]
 #[tracing::instrument(level = "debug", skip(self, loaded, conn))]
 pub async fn store_connection(
@@ -373,7 +377,9 @@ pub async fn store_connection(
 
 	self.db.userdeviceconnid_conn.put_raw(key, state);
 
-	if let Some(registry) = self.services.server.metrics.prometheus() {
+	if conn.next_batch != 0
+		&& let Some(registry) = self.services.server.metrics.prometheus()
+	{
 		registry
 			.sync
 			.v5_state(u64::try_from(bytes).unwrap_or(u64::MAX));

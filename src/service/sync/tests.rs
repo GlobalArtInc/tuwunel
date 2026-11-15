@@ -92,6 +92,44 @@ fn request_with_e2ee(enabled: bool) -> Request {
 	request
 }
 
+#[tokio::test]
+async fn a_fastpath_mismatch_counts_in_the_atomic_and_in_the_metric() -> Result {
+	let Some(fixture) = fixture(Figment::new().merge(("metrics.enable", true))).await? else {
+		return Ok(());
+	};
+
+	let services = &fixture.services;
+	let registry = services.server.metrics.enable_prometheus();
+	let sync = &services.sync;
+
+	assert_eq!(sync.fastpath_mismatches(), 0);
+	assert!(
+		registry
+			.render()
+			.contains("tuwunel_sync_fastpath_mismatches_total 0\n")
+	);
+
+	sync.note_fastpath_mismatch();
+
+	assert_eq!(sync.fastpath_mismatches(), 1);
+	assert!(
+		registry
+			.render()
+			.contains("tuwunel_sync_fastpath_mismatches_total 1\n")
+	);
+
+	sync.note_fastpath_mismatch();
+
+	assert_eq!(sync.fastpath_mismatches(), 2);
+	assert!(
+		registry
+			.render()
+			.contains("tuwunel_sync_fastpath_mismatches_total 2\n")
+	);
+
+	Ok(())
+}
+
 #[test]
 fn update_cache_replaces_existing_list_ranges() {
 	let mut conn = Connection::default();
@@ -1020,10 +1058,18 @@ async fn stored_connections_are_measured_and_counted_by_the_collector() -> Resul
 
 	for key in &keys[..3] {
 		let conn = sync.load_or_init_connection(key).await?;
+		let mut state = conn.lock().await;
+		state.next_batch = 1;
 
-		sync.store_connection(key, &conn, &*conn.lock().await)
-			.await?;
+		sync.store_connection(key, &conn, &state).await?;
 	}
+
+	assert_eq!(registry.sync.v5_states(), 3);
+
+	let reset = sync.load_or_init_connection(&keys[0]).await?;
+
+	sync.store_connection(&keys[0], &reset, &Connection::default())
+		.await?;
 
 	assert_eq!(registry.sync.v5_states(), 3);
 	assert_eq!(sync.loaded_connection_count(), Some(3));

@@ -1,8 +1,3 @@
-//! Metrics of object-storage providers.
-//!
-//! Series are labelled by the name of the provider as configured, capped like
-//! any open label; providers beyond the cap share the `_other` series.
-
 use std::time::Duration;
 
 use super::{
@@ -60,6 +55,9 @@ label_set! {
 }
 
 /// Metrics of object-storage providers.
+///
+/// Series are labelled by the name of the provider as configured, capped like
+/// any open label; providers beyond the cap share the `_other` series.
 pub struct Storage {
 	operations: DynFamily<EnumFamily<(Op, StoreResult), Counter>>,
 	duration: DynFamily<EnumFamily<Op, Histogram<13>>>,

@@ -4,6 +4,7 @@
 //! verify chunk boundaries without requiring a live storage backend.
 
 use bytes::Bytes;
+use futures::stream;
 use object_store::PutPayload;
 use tuwunel_core::{Result, config::Figment, metrics::prom::Op};
 
@@ -65,16 +66,13 @@ async fn provider_operations_are_counted_by_outcome() -> Result {
 	let registry = services.server.metrics.enable_prometheus();
 	let provider = services.storage.provider("media")?;
 	let count = |op, ok| registry.storage.operations("media", op, ok);
-	let before = [
-		count(Op::Put, true),
-		count(Op::Head, true),
-		count(Op::Get, true),
-		count(Op::Get, false),
-		count(Op::Delete, true),
-	];
 
 	provider
 		.put_one("metrics/object", Bytes::from_static(b"payload"))
+		.await?;
+
+	provider
+		.put("metrics/multi", None, stream::iter([Ok(Bytes::from_static(b"multi"))]))
 		.await?;
 
 	provider.head("metrics/object").await?;
@@ -86,15 +84,21 @@ async fn provider_operations_are_counted_by_outcome() -> Result {
 
 	provider.delete_one("metrics/object").await?;
 
+	provider
+		.delete_one("metrics/../object")
+		.await
+		.expect_err("the path does not parse");
+
 	let after = [
 		count(Op::Put, true),
 		count(Op::Head, true),
 		count(Op::Get, true),
 		count(Op::Get, false),
 		count(Op::Delete, true),
+		count(Op::Delete, false),
 	];
 
-	assert_eq!(after.map(|n| n.saturating_sub(1)), before);
+	assert_eq!(after, [2, 1, 1, 1, 1, 0]);
 
 	let text = registry.render();
 
@@ -103,6 +107,12 @@ async fn provider_operations_are_counted_by_outcome() -> Result {
 	));
 	assert!(
 		text.contains("tuwunel_storage_operation_seconds_count{provider=\"media\",op=\"head\"} ")
+	);
+	assert!(
+		text.contains(
+			"tuwunel_storage_operation_seconds_count{provider=\"media\",op=\"put\"} 2\n"
+		),
+		"{text}"
 	);
 
 	Ok(())

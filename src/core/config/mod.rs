@@ -43,6 +43,7 @@ pub mod client;
 pub mod compatibility;
 pub mod configuration;
 pub mod logging;
+/// Configures the Prometheus metrics endpoint.
 pub mod metrics;
 pub mod presence;
 pub mod push;

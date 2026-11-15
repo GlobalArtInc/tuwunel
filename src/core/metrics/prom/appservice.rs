@@ -1,10 +1,4 @@
-//! Metrics of delivery to appservices.
-//!
-//! Series are labelled by the id of the appservice registration. Ids are chosen
-//! by the operator, but the number of series is capped regardless, and
-//! appservices beyond the cap share the `_other` series.
-
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use super::{
 	family::{DynFamily, EnumFamily},
@@ -40,7 +34,8 @@ label_set! {
 		/// The connection or the transfer failed.
 		Network => "network",
 		/// The appservice answered, but not with a usable success: a status
-		/// outside 2xx, or a body that could not be read or understood.
+		/// outside 2xx, or a body that could not be read or understood. A
+		/// timeout while reading the body counts here, not as a timeout.
 		BadResponse => "bad_response",
 		/// Any other failure.
 		Other => "other",
@@ -48,6 +43,10 @@ label_set! {
 }
 
 /// Metrics of delivery to appservices.
+///
+/// Series are labelled by the id of the appservice registration. Ids are chosen
+/// by the operator, but the number of series is capped regardless, and
+/// appservices beyond the cap share the `_other` series.
 pub struct Appservice {
 	transactions: DynFamily<EnumFamily<SendResult, Counter>>,
 	duration: DynFamily<Histogram<11>>,
@@ -86,11 +85,28 @@ impl Appservice {
 		self.pings.get(&[appservice]).get(result).inc();
 	}
 
-	/// Stores the number of events waiting in the queue of an appservice.
-	pub fn set_queued(&self, appservice: &str, events: u64) {
-		self.queued
-			.get(&[appservice])
-			.set_unsigned(events);
+	/// Stores the number of events waiting in the queue of each appservice of
+	/// one scan.
+	///
+	/// The gauges of appservices beyond the cap share one series, which gets the
+	/// sum of their events rather than the value of whichever came last.
+	pub fn set_queued(&self, queues: &[(&str, u64)]) {
+		let mut shared: Option<(Arc<Gauge>, u64)> = None;
+
+		for &(appservice, events) in queues {
+			let gauge = self.queued.get(&[appservice]);
+			if !self.queued.is_other(&gauge) {
+				gauge.set_unsigned(events);
+				continue;
+			}
+
+			let (_, total) = shared.get_or_insert_with(|| (Arc::clone(&gauge), 0));
+			*total = total.saturating_add(events);
+		}
+
+		if let Some((gauge, total)) = shared {
+			gauge.set_unsigned(total);
+		}
 	}
 
 	#[must_use]
@@ -107,7 +123,8 @@ impl Appservice {
 		w.metric(
 			"tuwunel_appservice_transactions_total",
 			"Attempts to send a transaction to an appservice, by how they ended; a retry is \
-			 another attempt.",
+			 another attempt, and a timeout reading the body or a request that could not be \
+			 built is recorded as bad_response.",
 			&self.transactions,
 		);
 		w.metric(
@@ -123,7 +140,8 @@ impl Appservice {
 		);
 		w.metric(
 			"tuwunel_appservice_ping_total",
-			"Pings of an appservice, by how they ended.",
+			"Pings of an appservice, by how they ended; a request that could not be built is \
+			 recorded as other.",
 			&self.pings,
 		);
 	}
@@ -150,3 +168,6 @@ impl std::fmt::Debug for Appservice {
 			.finish_non_exhaustive()
 	}
 }
+
+#[cfg(test)]
+mod tests;

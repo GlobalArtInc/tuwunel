@@ -5,6 +5,13 @@
 //! telemetry.
 
 pub mod dump;
+/// Prometheus registry on relaxed atomics.
+///
+/// A static structure of named groups, one file per group, of counters, gauges
+/// and histograms with fixed buckets. Labels come from closed enums or from
+/// open sets with a ceiling on the number of series. Reading takes no locks
+/// beyond short read locks on open families, and the text format is Prometheus
+/// 0.0.4.
 pub mod prom;
 
 use std::sync::{

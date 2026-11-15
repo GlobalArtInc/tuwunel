@@ -1,7 +1,8 @@
-//! Counter, gauge and histogram built on relaxed atomics.
-
 use std::{
-	sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering::Relaxed},
+	sync::atomic::{
+		AtomicBool, AtomicI64, AtomicU64,
+		Ordering::{Acquire, Relaxed, Release},
+	},
 	time::{Duration, Instant},
 };
 
@@ -36,7 +37,9 @@ pub struct Gauge {
 /// Wraps a metric that is exposed only after it was first written.
 ///
 /// Used for readings that a collector fills in and that may be unavailable on
-/// a platform or before the first scan, where a zero would be misleading.
+/// a platform or before the first scan, where a zero would be misleading. The
+/// mark is released after the value is written and acquired before it is read,
+/// whatever ordering the metric itself uses.
 #[derive(Debug, Default)]
 pub struct Seen<M> {
 	seen: AtomicBool,
@@ -99,21 +102,27 @@ impl Counter {
 
 impl<M> Seen<M> {
 	#[must_use]
-	/// Wraps `inner`, which stays unexposed until [`Self::touch`].
+	/// Wraps `inner`, which stays unexposed until [`Self::publish`].
 	pub const fn new(inner: M) -> Self { Self { seen: AtomicBool::new(false), inner } }
 
 	#[inline]
-	/// Marks the metric as written and returns it.
-	pub fn touch(&self) -> &M {
-		self.seen.store(true, Relaxed);
+	/// Applies a write to the metric and then marks it as written, so a
+	/// reader that sees the mark also sees the value and never a zero between
+	/// the two.
+	pub fn publish<R, W>(&self, write: W) -> R
+	where
+		W: FnOnce(&M) -> R,
+	{
+		let written = write(&self.inner);
+		self.seen.store(true, Release);
 
-		&self.inner
+		written
 	}
 
 	#[inline]
 	#[must_use]
 	/// Returns whether the metric was ever written.
-	pub fn is_seen(&self) -> bool { self.seen.load(Relaxed) }
+	pub fn is_seen(&self) -> bool { self.seen.load(Acquire) }
 }
 
 impl<M: Metric> Metric for Seen<M> {
@@ -274,3 +283,6 @@ impl<const N: usize> Drop for Timer<'_, N> {
 			.observe_duration(self.started.elapsed());
 	}
 }
+
+#[cfg(test)]
+mod tests;

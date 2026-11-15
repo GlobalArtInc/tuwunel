@@ -1,12 +1,3 @@
-//! Metrics of the RocksDB engine.
-//!
-//! Events of the engine are counted as they happen. Sizes and occupancy are
-//! read from RocksDB by a collector and stored here as a [`RocksSample`]; a
-//! reading that could not be taken is left out of the sample and the metric
-//! keeps its previous value, or stays out of the exposition until the first
-//! reading. Properties are summed over all column families, so no series
-//! carries the name of a column family.
-
 use super::{
 	family::{DynFamily, EnumFamily},
 	types::{Counter, Gauge, Metric, Seen},
@@ -81,14 +72,19 @@ pub struct RocksSample {
 	/// Bytes of the SST files of all column families.
 	pub sst_bytes: Option<u64>,
 
-	/// Number of live SST files.
-	pub sst_files: Option<u64>,
-
 	/// Bytes of the write-ahead log files.
 	pub wal_bytes: Option<u64>,
 }
 
 /// Metrics of the RocksDB engine.
+///
+/// Events of the engine are counted as they happen. Sizes and occupancy are
+/// read from RocksDB by a collector and stored here as a [`RocksSample`]; a
+/// reading that could not be taken is left out of the sample and the metric
+/// keeps its previous value, or stays out of the exposition until the first
+/// reading. The number of SST files comes from a slower scan and is stored
+/// with [`Self::set_sst_files`]. Properties are summed over all column
+/// families, so no series carries the name of a column family.
 pub struct Rocksdb {
 	block_cache_usage: DynFamily<Gauge>,
 	block_cache_pinned: DynFamily<Gauge>,
@@ -161,15 +157,21 @@ impl Rocksdb {
 			(&self.write_stopped, sample.write_stopped),
 			(&self.delayed_write_rate, sample.delayed_write_rate_bytes),
 			(&self.sst_bytes, sample.sst_bytes),
-			(&self.sst_files, sample.sst_files),
 			(&self.wal_bytes, sample.wal_bytes),
 		];
 
 		for (gauge, value) in gauges {
 			if let Some(value) = value {
-				gauge.touch().set_unsigned(value);
+				gauge.publish(|gauge| gauge.set_unsigned(value));
 			}
 		}
+	}
+
+	/// Stores the number of live SST files, which a periodic scan counts
+	/// because listing them takes a database lock.
+	pub fn set_sst_files(&self, files: u64) {
+		self.sst_files
+			.publish(|gauge| gauge.set_unsigned(files));
 	}
 
 	#[inline]
@@ -260,7 +262,11 @@ impl Rocksdb {
 				"Bytes of SST files, summed over column families.",
 				&self.sst_bytes,
 			),
-			("tuwunel_rocksdb_sst_files", "Live SST files.", &self.sst_files),
+			(
+				"tuwunel_rocksdb_sst_files",
+				"Live SST files, counted by a periodic scan.",
+				&self.sst_files,
+			),
 			(
 				"tuwunel_rocksdb_wal_bytes",
 				"Bytes of write-ahead log files in the database directory.",

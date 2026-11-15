@@ -36,7 +36,7 @@ pub async fn ping(
 	let mut http_request = request
 		.try_into_http_request::<BytesMut>(base, SendAccessToken::IfRequired(hs_token), ())
 		.map_err(|e| {
-			self.record_ping(&registration.id, SendResult::Network);
+			self.record_ping(&registration.id, SendResult::Other);
 
 			err!(Request(ConnectionFailed(warn!(
 				appservice = %registration.id,
@@ -49,7 +49,9 @@ pub async fn ping(
 
 	add_access_token_query(&mut http_request, hs_token);
 
-	let reqwest_request = Request::try_from(http_request)?;
+	let reqwest_request = Request::try_from(http_request).inspect_err(|_| {
+		self.record_ping(&registration.id, SendResult::Other);
+	})?;
 
 	let response = client
 		.execute(reqwest_request)

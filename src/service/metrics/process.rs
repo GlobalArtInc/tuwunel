@@ -6,13 +6,13 @@ pub(super) struct Sampled {
 }
 
 #[cfg(target_os = "linux")]
-const USER_HZ: u64 = 100;
+const DEFAULT_USER_HZ: u64 = 100;
 
 #[cfg(target_os = "linux")]
 pub(super) fn sample() -> Sampled {
 	use std::fs::{read_dir, read_to_string};
 
-	use tuwunel_core::utils::sys::{max_file_descriptors, page_size};
+	use tuwunel_core::utils::sys::{clock_ticks, max_file_descriptors, page_size};
 
 	let mut failed = Vec::new();
 	let mut note = |name: &'static str| failed.push(name);
@@ -37,9 +37,11 @@ pub(super) fn sample() -> Sampled {
 		u64::try_from(open.saturating_sub(1)).unwrap_or(u64::MAX)
 	});
 
-	let max_fds = max_file_descriptors()
-		.ok()
-		.and_then(|(soft, _)| u64::try_from(soft).ok());
+	let limits = max_file_descriptors().ok();
+	let max_fds = limits
+		.map(|(soft, _)| soft)
+		.filter(|soft| *soft != usize::MAX)
+		.and_then(|soft| u64::try_from(soft).ok());
 
 	if stat.is_none() {
 		note("/proc/self/stat");
@@ -53,13 +55,19 @@ pub(super) fn sample() -> Sampled {
 		note("/proc/self/fd");
 	}
 
-	if max_fds.is_none() {
+	if limits.is_none() {
 		note("getrlimit");
 	}
 
+	let user_hz = clock_ticks().unwrap_or(DEFAULT_USER_HZ);
+
 	let sample = ProcessSample {
 		resident_bytes,
-		cpu_micros: stat.map(|(ticks, _)| ticks.saturating_mul(1_000_000 / USER_HZ)),
+		cpu_micros: stat.and_then(|(ticks, _)| {
+			ticks
+				.saturating_mul(1_000_000)
+				.checked_div(user_hz)
+		}),
 		threads: stat.map(|(_, threads)| threads),
 		open_fds,
 		max_fds,

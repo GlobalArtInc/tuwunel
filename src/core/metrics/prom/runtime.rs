@@ -1,8 +1,3 @@
-//! Metrics of the async runtime.
-//!
-//! Only what tokio exposes without `tokio_unstable` is covered. A collector
-//! samples the runtime and stores the readings here.
-
 use super::{
 	types::{Counter, Gauge, Metric},
 	write::{Scale, Writer},
@@ -28,6 +23,9 @@ pub struct RuntimeSample {
 }
 
 /// Metrics of the async runtime.
+///
+/// Only what tokio exposes without `tokio_unstable` is covered. A collector
+/// samples the runtime and stores the readings here.
 #[derive(Debug)]
 pub struct Runtime {
 	workers: Gauge,

@@ -1,14 +1,12 @@
-//! Sizes of what the server holds: cached rooms and counted records.
-//!
-//! The counts come from scans that run every few minutes or not at all, so a
-//! count is left out of the exposition until its first scan.
-
 use super::{
 	types::{Gauge, Metric, Seen},
 	write::Writer,
 };
 
-/// Sizes of caches and counts of records.
+/// Sizes of what the server holds: cached rooms and counted records.
+///
+/// The counts come from scans that run every few minutes or not at all, so a
+/// count is left out of the exposition until its first scan.
 #[derive(Debug, Default)]
 pub struct Inventory {
 	last_normal_entries: Gauge,
@@ -27,14 +25,16 @@ impl Inventory {
 		self.last_normal_entries.set_unsigned(entries);
 	}
 
-	/// Stores the number of local user accounts.
-	pub fn set_users(&self, users: u64) { self.users.touch().set_unsigned(users); }
+	/// Stores the number of rows of the password table: every account the
+	/// server holds a password row for, including deactivated ones, the
+	/// server's own user and the users of appservices.
+	pub fn set_users(&self, users: u64) { self.users.publish(|g| g.set_unsigned(users)); }
 
 	/// Stores the number of rooms the server knows.
-	pub fn set_rooms(&self, rooms: u64) { self.rooms.touch().set_unsigned(rooms); }
+	pub fn set_rooms(&self, rooms: u64) { self.rooms.publish(|g| g.set_unsigned(rooms)); }
 
 	/// Stores the number of devices of local users.
-	pub fn set_devices(&self, devices: u64) { self.devices.touch().set_unsigned(devices); }
+	pub fn set_devices(&self, devices: u64) { self.devices.publish(|g| g.set_unsigned(devices)); }
 
 	pub(super) fn write(&self, w: &mut Writer) {
 		w.metric(
@@ -46,7 +46,8 @@ impl Inventory {
 		if self.users.is_seen() {
 			w.metric(
 				"tuwunel_users_registered",
-				"Local user accounts, counted by a periodic scan.",
+				"Rows of the password table, counted by a periodic scan: every account, \
+				 including deactivated ones, the server user and appservice users.",
 				&self.users,
 			);
 		}

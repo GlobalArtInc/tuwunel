@@ -1,11 +1,3 @@
-//! Background collector of the Prometheus metrics.
-//!
-//! Scraping only reads atomics. Everything that needs a syscall or a walk
-//! over the database happens here, on a timer: cheap gauges every
-//! `metrics.collect_interval` seconds and counting scans every
-//! `metrics.count_interval` seconds. The worker ends at once when metrics are
-//! off, and a failed reading or scan is logged and leaves the previous value.
-
 mod collect;
 mod count;
 mod process;
@@ -13,7 +5,8 @@ mod process;
 mod tests;
 
 use std::{
-	sync::{Arc, atomic::AtomicBool},
+	collections::HashSet,
+	sync::{Arc, Mutex, atomic::AtomicBool},
 	time::{Duration, Instant},
 };
 
@@ -25,6 +18,14 @@ use tuwunel_database::{Database, Map};
 use crate::{OnceServices, service::make_name};
 
 /// Collects process, runtime, database and count gauges into the registry.
+///
+/// Scraping only reads atomics. Everything that needs a syscall or a walk over
+/// the database happens here, on a timer: cheap gauges every
+/// `metrics.collect_interval` seconds and counting scans every
+/// `metrics.count_interval` seconds, the first one a full interval after
+/// startup. The worker ends at once when metrics are off, and a shutdown
+/// interrupts it even in the middle of a reading or a scan. A failed reading or
+/// scan is logged and leaves the previous value.
 pub struct Service {
 	server: Arc<Server>,
 	services: Arc<OnceServices>,
@@ -33,8 +34,11 @@ pub struct Service {
 	roomid_shortroomid: Arc<Map>,
 	userdeviceid_metadata: Arc<Map>,
 	userdeviceconnid_conn: Arc<Map>,
+	process_task_failed: AtomicBool,
 	process_failed: AtomicBool,
+	rocksdb_task_failed: AtomicBool,
 	rocksdb_failed: AtomicBool,
+	queued_ids: Mutex<HashSet<String>>,
 }
 
 #[async_trait]
@@ -48,8 +52,11 @@ impl crate::Service for Service {
 			roomid_shortroomid: args.db["roomid_shortroomid"].clone(),
 			userdeviceid_metadata: args.db["userdeviceid_metadata"].clone(),
 			userdeviceconnid_conn: args.db["userdeviceconnid_conn"].clone(),
+			process_task_failed: AtomicBool::new(false),
 			process_failed: AtomicBool::new(false),
+			rocksdb_task_failed: AtomicBool::new(false),
 			rocksdb_failed: AtomicBool::new(false),
+			queued_ids: Mutex::new(HashSet::new()),
 		}))
 	}
 
@@ -59,15 +66,11 @@ impl crate::Service for Service {
 			return Ok(());
 		}
 
-		let mut counted: Option<Instant> = None;
+		let mut counted = Instant::now();
 		while self.server.is_running() {
-			self.collect_once().await;
-
-			let interval = self.server.config.metrics.count_interval;
-			let due = counted.is_none_or(|at| at.elapsed() >= Duration::from_secs(interval));
-			if interval > 0 && due {
-				self.count_once().await;
-				counted = Some(Instant::now());
+			tokio::select! {
+				() = self.tick(&mut counted) => {},
+				() = self.server.until_shutdown() => break,
 			}
 
 			let pause = self.server.config.metrics.collect_interval.max(1);
@@ -82,4 +85,16 @@ impl crate::Service for Service {
 	}
 
 	fn name(&self) -> &str { make_name(std::module_path!()) }
+}
+
+impl Service {
+	async fn tick(&self, counted: &mut Instant) {
+		self.collect_once().await;
+
+		let interval = self.server.config.metrics.count_interval;
+		if interval > 0 && counted.elapsed() >= Duration::from_secs(interval) {
+			self.count_once().await;
+			*counted = Instant::now();
+		}
+	}
 }

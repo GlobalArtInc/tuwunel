@@ -62,12 +62,22 @@ async fn collect_connection_store(&self, registry: &Registry) {
 
 #[implement(Service)]
 async fn collect_process(&self, registry: &Registry) {
-	let sampled = match spawn_blocking(process::sample).await {
-		| Ok(sampled) => sampled,
-		| Err(e) => {
-			error!("The process sampling task failed: {e}");
-			return;
-		},
+	let sampled = if cfg!(target_os = "linux") {
+		match spawn_blocking(process::sample).await {
+			| Ok(sampled) => sampled,
+			| Err(e) => {
+				if !self
+					.process_task_failed
+					.swap(true, Ordering::Relaxed)
+				{
+					error!("The process sampling task failed: {e}");
+				}
+
+				return;
+			},
+		}
+	} else {
+		process::sample()
 	};
 
 	if !sampled.failed.is_empty() && !self.process_failed.swap(true, Ordering::Relaxed) {
@@ -94,7 +104,13 @@ async fn collect_rocksdb(&self, registry: &Registry) {
 	let snapshot = match spawn_blocking(move || db.metrics_snapshot()).await {
 		| Ok(snapshot) => snapshot,
 		| Err(e) => {
-			error!("The RocksDB sampling task failed: {e}");
+			if !self
+				.rocksdb_task_failed
+				.swap(true, Ordering::Relaxed)
+			{
+				error!("The RocksDB sampling task failed: {e}");
+			}
+
 			return;
 		},
 	};

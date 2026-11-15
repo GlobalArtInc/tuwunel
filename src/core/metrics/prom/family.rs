@@ -1,5 +1,3 @@
-//! Labelled families: closed sets indexed by enum, open sets with a ceiling.
-
 use std::{
 	collections::HashMap,
 	marker::PhantomData,
@@ -228,6 +226,11 @@ impl<M> DynFamily<M> {
 
 		metric
 	}
+
+	#[must_use]
+	/// Returns whether `metric`, as returned by [`Self::get`], is the shared
+	/// `_other` series rather than one a key owns.
+	pub fn is_other(&self, metric: &Arc<M>) -> bool { Arc::ptr_eq(&self.other, metric) }
 
 	#[must_use]
 	/// Returns the number of keys with their own series.

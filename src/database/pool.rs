@@ -45,7 +45,9 @@ pub(crate) struct Pool {
 /// the same instant.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PoolStats {
-	/// Number of worker threads that are running.
+	/// Number of worker threads the pool started and holds a handle for. It
+	/// counts handles, not threads known to be alive: a thread that died
+	/// early is counted until the pool is closed.
 	pub workers: usize,
 
 	/// Number of requests waiting in the queues for a worker.
@@ -158,7 +160,8 @@ impl Drop for Pool {
 	}
 }
 
-/// Reports how many workers the pool runs and how many requests wait for one.
+/// Reports how many worker threads the pool holds handles for and how many
+/// requests wait for one.
 ///
 /// Reads two counters and takes the worker list lock only to count it, so it
 /// is cheap enough to call on a timer.

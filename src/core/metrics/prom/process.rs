@@ -1,9 +1,3 @@
-//! Metrics of the server process.
-//!
-//! The names follow the conventional `process_*` family so that stock
-//! dashboards work. A collector fills them in from the operating system; a
-//! reading the platform cannot give is left out of the exposition.
-
 use super::{
 	types::{Counter, Gauge, Metric, Seen},
 	write::{Scale, Writer},
@@ -25,7 +19,7 @@ pub struct ProcessSample {
 	/// Number of open file descriptors.
 	pub open_fds: Option<u64>,
 
-	/// Soft limit on open file descriptors.
+	/// Soft limit on open file descriptors; `None` also when there is no limit.
 	pub max_fds: Option<u64>,
 
 	/// Start of the process in seconds since the Unix epoch.
@@ -33,6 +27,10 @@ pub struct ProcessSample {
 }
 
 /// Metrics of the server process.
+///
+/// The names follow the conventional `process_*` family so that stock
+/// dashboards work. A collector fills them in from the operating system; a
+/// reading the platform cannot give is left out of the exposition.
 #[derive(Debug)]
 pub struct Process {
 	resident: Seen<Gauge>,
@@ -69,12 +67,12 @@ impl Process {
 
 		for (gauge, value) in gauges {
 			if let Some(value) = value {
-				gauge.touch().set_unsigned(value);
+				gauge.publish(|gauge| gauge.set_unsigned(value));
 			}
 		}
 
 		if let Some(micros) = sample.cpu_micros {
-			self.cpu.touch().raise_to(micros);
+			self.cpu.publish(|cpu| cpu.raise_to(micros));
 		}
 	}
 
@@ -133,3 +131,6 @@ impl Process {
 impl Default for Process {
 	fn default() -> Self { Self::new() }
 }
+
+#[cfg(test)]
+mod tests;

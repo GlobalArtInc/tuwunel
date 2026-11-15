@@ -1,7 +1,15 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+	collections::HashSet,
+	pin::pin,
+	sync::{Arc, PoisonError},
+	time::Duration,
+};
 
-use futures::{StreamExt, TryFutureExt, TryStreamExt, future::ready};
-use tokio::time::timeout;
+use futures::{StreamExt, TryFutureExt, TryStreamExt};
+use tokio::{
+	task::{spawn_blocking, yield_now},
+	time::timeout,
+};
 use tuwunel_core::{Result, err, implement, warn};
 use tuwunel_database::Map;
 
@@ -11,12 +19,20 @@ const SCAN_TIMEOUT: Duration = Duration::from_mins(1);
 
 const QUEUE_CAP: usize = 100_000;
 
-/// Counts users, rooms and devices by walking their keys once, and the events
-/// queued for each appservice up to a ceiling.
+const YIELD_EVERY: u64 = 1000;
+
+/// Counts users, rooms, devices and stored sliding sync connections by walking
+/// their keys once, live SST files, and the events queued for each appservice
+/// up to a ceiling.
+///
+/// An appservice that is no longer registered is set to zero queued events once
+/// instead of keeping its last value.
 ///
 /// Each count is independent. A scan that fails or runs past a minute is
 /// logged and its gauge keeps the previous value. The walk holds no lock of
-/// the main paths; it reads through a database iterator like any other scan.
+/// the main paths. It reads storage without filling the block cache, so it
+/// evicts nothing, and it hands the thread back every thousand keys, so a long
+/// column neither starves other tasks nor outlives its time limit.
 #[implement(Service)]
 pub async fn count_once(&self) {
 	let Some(registry) = self.server.metrics.prometheus() else {
@@ -24,6 +40,10 @@ pub async fn count_once(&self) {
 	};
 
 	let inventory = &registry.inventory;
+
+	if let Some(files) = guarded("sst files", self.sst_files()).await {
+		registry.rocksdb.set_sst_files(files);
+	}
 
 	if let Some(users) = scan("users", &self.userid_password).await {
 		inventory.set_users(users);
@@ -51,15 +71,36 @@ pub async fn count_once(&self) {
 		.collect()
 		.await;
 
-	for id in ids {
+	let mut queues = Vec::with_capacity(ids.len());
+	for id in &ids {
 		let queued = sending
-			.queued_for(&id, QUEUE_CAP)
+			.queued_for(id, QUEUE_CAP)
 			.map_ok(|events| u64::try_from(events).unwrap_or(u64::MAX));
 
 		if let Some(events) = guarded("appservice queue", queued).await {
-			registry.appservice.set_queued(&id, events);
+			queues.push((id.as_str(), events));
 		}
 	}
+
+	let gone = self.unregistered_since_last_scan(&ids);
+
+	queues.extend(gone.iter().map(|id| (id.as_str(), 0)));
+
+	registry.appservice.set_queued(&queues);
+}
+
+#[implement(Service)]
+pub(super) fn unregistered_since_last_scan(&self, ids: &[String]) -> Vec<String> {
+	let current: HashSet<String> = ids.iter().cloned().collect();
+	let mut previous = self
+		.queued_ids
+		.lock()
+		.unwrap_or_else(PoisonError::into_inner);
+
+	let gone = previous.difference(&current).cloned().collect();
+	*previous = current;
+
+	gone
 }
 
 async fn scan(what: &'static str, map: &Arc<Map>) -> Option<u64> {
@@ -78,8 +119,23 @@ async fn guarded(what: &'static str, count: impl Future<Output = Result<u64>>) -
 }
 
 async fn count_keys(map: &Arc<Map>) -> Result<u64> {
-	map.raw_keys()
-		.map_ok(|_| 1_u64)
-		.try_fold(0_u64, |total, one| ready(Ok(total.saturating_add(one))))
-		.await
+	let mut scan = pin!(map.raw_scan());
+	let mut total = 0_u64;
+
+	while scan.try_next().await?.is_some() {
+		total = total.saturating_add(1);
+
+		if total.is_multiple_of(YIELD_EVERY) {
+			yield_now().await;
+		}
+	}
+
+	Ok(total)
+}
+
+#[implement(Service)]
+async fn sst_files(&self) -> Result<u64> {
+	let db = Arc::clone(&self.db);
+
+	spawn_blocking(move || db.sst_file_count()).await?
 }

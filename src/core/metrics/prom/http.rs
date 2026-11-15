@@ -1,10 +1,3 @@
-//! Metrics of the HTTP server.
-//!
-//! Requests are counted and timed per route and method, handlers in flight are
-//! counted per route, and the size of sync responses is recorded per API. A
-//! route is the template the router matched, never the path of a request, so
-//! identifiers in a path cannot become labels.
-
 #[cfg(test)]
 mod tests;
 
@@ -109,6 +102,11 @@ pub enum Method {
 }
 
 /// Metrics of the HTTP server.
+///
+/// Requests are counted and timed per route and method, handlers in flight are
+/// counted per route, and the size of sync responses is recorded per API. A
+/// route is the template the router matched, never the path of a request, so
+/// identifiers in a path cannot become labels.
 pub struct Http {
 	requests: Arc<DynFamily<EnumFamily<StatusClass, Counter>>>,
 	duration: Arc<DynFamily<Histogram<14>>>,

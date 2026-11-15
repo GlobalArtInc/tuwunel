@@ -1497,6 +1497,7 @@ async fn a_flush_is_counted_and_its_files_are_sized() -> Result {
 	assert!(before.failed.is_empty(), "{:?}", before.failed);
 	assert!(before.sample.memtable_bytes > Some(0));
 	assert_eq!(before.sample.sst_bytes, Some(0));
+	assert_eq!(db.sst_file_count()?, 0);
 	assert_eq!(registry.rocksdb.flushes(), 0);
 
 	db.engine.sort()?;
@@ -1511,7 +1512,7 @@ async fn a_flush_is_counted_and_its_files_are_sized() -> Result {
 	let after = db.metrics_snapshot();
 	assert!(after.failed.is_empty(), "{:?}", after.failed);
 	assert!(after.sample.sst_bytes > Some(0));
-	assert!(after.sample.sst_files >= Some(1));
+	assert!(db.sst_file_count()? >= 1);
 	assert!(after.sample.wal_bytes.is_some());
 	assert_eq!(after.sample.write_stopped, Some(0));
 	assert!(

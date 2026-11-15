@@ -1,9 +1,3 @@
-//! Configures the Prometheus metrics endpoint.
-//!
-//! The endpoint has its own listener, separate from the client and federation
-//! listeners, and is off by default. A background collector samples process,
-//! runtime and database state at fixed intervals.
-
 use std::{
 	net::{IpAddr, Ipv4Addr},
 	path::PathBuf,
@@ -110,9 +104,13 @@ pub struct Metrics {
 
 	/// Sets the seconds between counting scans, or 0 to turn them off.
 	///
-	/// A scan walks database keys to count users, rooms, devices, stored
-	/// sliding sync connections and queued appservice events. Those gauges
-	/// stay at their last value while scans are off.
+	/// A scan walks database keys to count users, rooms, devices and stored
+	/// sliding sync connections, counts live SST files and queued appservice
+	/// events. The first scan runs one interval after startup, not at startup,
+	/// so it does not compete with the server warming up. Scans run on the
+	/// collection tick, so a value below `collect_interval` acts as
+	/// `collect_interval`, and any other value is rounded up to a multiple of
+	/// it. The counts stay at their last value while scans are off.
 	///
 	/// reloadable: yes
 	/// default: 300

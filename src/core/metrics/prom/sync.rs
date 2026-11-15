@@ -194,13 +194,13 @@ impl SyncMetrics {
 	/// Stores the number of sliding sync connections kept in the database.
 	pub fn set_v5_connections_stored(&self, connections: u64) {
 		self.v5_connections_stored
-			.touch()
-			.set_unsigned(connections);
+			.publish(|gauge| gauge.set_unsigned(connections));
 	}
 
 	/// Stores the bytes the database holds for sliding sync connections.
 	pub fn set_v5_store_bytes(&self, bytes: u64) {
-		self.v5_store_bytes.touch().set_unsigned(bytes);
+		self.v5_store_bytes
+			.publish(|gauge| gauge.set_unsigned(bytes));
 	}
 
 	#[must_use]
@@ -296,14 +296,16 @@ impl SyncMetrics {
 
 		w.metric(
 			"tuwunel_sync_v5_connection_state_bytes",
-			"Size of a sliding sync connection as stored after a response.",
+			"Size of a sliding sync connection as stored after a response; the empty state \
+			 stored when a client resets its connection is not counted.",
 			&self.v5_state_bytes,
 		);
 
 		if self.v5_store_bytes.is_seen() {
 			w.metric(
 				"tuwunel_sync_v5_store_bytes",
-				"Bytes the sliding sync connection column occupies in table files.",
+				"Bytes of table files the sliding sync connection column occupies, without \
+				 memtables and including superseded versions of rows until compaction.",
 				&self.v5_store_bytes,
 			);
 		}

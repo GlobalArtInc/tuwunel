@@ -71,7 +71,6 @@ pub fn metrics_snapshot(&self) -> MetricsSnapshot {
 	sample.write_stopped = one("write_stopped", WRITE_STOPPED);
 	sample.delayed_write_rate_bytes = one("delayed_write_rate_bytes", DELAYED_WRITE_RATE);
 
-	sample.sst_files = reading(&mut failed, "sst_files", self.sst_files());
 	sample.wal_bytes = reading(&mut failed, "wal_bytes", self.wal_bytes());
 
 	MetricsSnapshot { sample, failed }
@@ -127,8 +126,13 @@ fn global_property(&self, cfs: &[Arc<BoundColumnFamily<'_>>], name: &CStr) -> Re
 	self.property_integer(cf, name)
 }
 
+/// Counts the live SST files of the database.
+///
+/// Blocking: RocksDB builds the list of live files under the database mutex,
+/// which is why this is not part of [`Self::metrics_snapshot`] and is meant for
+/// a slow timer. Call it from a thread that may block.
 #[implement(Engine)]
-fn sst_files(&self) -> Result<u64> {
+pub fn sst_file_count(&self) -> Result<u64> {
 	let files = self.db.live_files().map_err(map_err)?;
 
 	Ok(u64::try_from(files.len())?)

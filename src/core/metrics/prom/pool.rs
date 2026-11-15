@@ -1,5 +1,3 @@
-//! Metrics of the database worker pool.
-
 use super::{
 	types::{Gauge, Metric},
 	write::Writer,
@@ -17,8 +15,8 @@ impl Pool {
 	/// Creates the group with every metric at zero.
 	pub fn new() -> Self { Self::default() }
 
-	/// Stores the size of the pool and the number of requests waiting for a
-	/// worker.
+	/// Stores the number of threads the pool started and the number of
+	/// requests waiting for a worker.
 	pub fn record(&self, workers: u64, queued: u64) {
 		self.workers.set_unsigned(workers);
 		self.queued.set_unsigned(queued);
@@ -27,7 +25,8 @@ impl Pool {
 	pub(super) fn write(&self, w: &mut Writer) {
 		w.metric(
 			"tuwunel_db_pool_workers",
-			"Number of threads in the database read pool.",
+			"Threads started by the database read pool and not yet joined; not a count of busy \
+			 or live threads.",
 			&self.workers,
 		);
 		w.metric(
