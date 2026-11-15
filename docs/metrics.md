@@ -115,6 +115,8 @@ shares the `_other` series.
 | `tuwunel_sync_journal_misses_total` | counter | `kind` |
 | `tuwunel_sync_v3_wait_scanned_total` | counter | none |
 | `tuwunel_sync_v3_wait_lookups_total` | counter | `how` |
+| `tuwunel_sync_v3_wait_verify_total` | counter | `verdict` |
+| `tuwunel_sync_v3_wait_wakes_total` | counter | `reason` |
 | `tuwunel_sync_v5_pass_seconds` | histogram | `pass` |
 | `tuwunel_sync_v5_response_rooms` | histogram | none |
 | `tuwunel_sync_v5_unknown_pos_total` | counter | none |
@@ -203,6 +205,13 @@ pass over, a window scanned again after a lookup counting again, and
 in the room of an entry: `how` is `room` for one room looked up on its own, and `set`
 for the list of every room the account is in loaded in one pass, which a wait does
 once it meets more than 32 rooms it does not know.
+
+`tuwunel_sync_v3_wait_verify_total` counts the verdicts of the shadow comparison of the
+sync journal with the database watchers, by `verdict`: `miss` means the journal would
+have let a long poll sleep through a change. It is counted only while
+`journal_wait_verify` is on. `tuwunel_sync_v3_wait_wakes_total` counts why a long poll
+that waits through the journal ended, by `reason`, and is counted only while
+`journal_wait` is on.
 
 ### Database
 

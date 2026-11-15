@@ -557,6 +557,21 @@ fn sync_candidates_switches_default_off_and_reload() {
 }
 
 #[test]
+fn sync_journal_wait_switches_default_off_and_reload() {
+	let default = default_config();
+	let enabled = config_from_toml(
+		"[global.client.sync]\njournal_wait = true\njournal_wait_verify = true\n",
+	)
+	.unwrap();
+
+	assert!(!default.client.sync.journal_wait);
+	assert!(!default.client.sync.journal_wait_verify);
+	assert!(enabled.client.sync.journal_wait);
+	assert!(enabled.client.sync.journal_wait_verify);
+	reload(&default, &enabled).expect("sync journal wait switches should reload");
+}
+
+#[test]
 fn sync_presence_only_min_rooms_default_off_and_reload() {
 	let default = default_config();
 	let enabled =

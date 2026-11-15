@@ -1293,6 +1293,26 @@
 #
 #candidates_verify = false
 
+# A legacy `/sync` long poll waits for changes through the change journal
+# instead of registering database watchers, which cuts the cost of every
+# long poll for accounts with many rooms. Needs `journal_capacity` above 0.
+# Run `journal_wait_verify` first and check that
+# `tuwunel_sync_v3_wait_verify_total{verdict="miss"}` stays at 0.
+# `journal_wait_verify` takes precedence.
+#
+# reloadable: yes
+#
+#journal_wait = false
+
+# The long poll still waits on database watchers, and the journal is asked
+# afterwards whether it would have woken the poll. The verdicts are counted
+# in `tuwunel_sync_v3_wait_verify_total`, by `verdict`. Needs
+# `journal_capacity` above 0.
+#
+# reloadable: yes
+#
+#journal_wait_verify = false
+
 # Joined-room count from which a legacy sync that has only presence to
 # report keeps waiting instead of answering.
 #

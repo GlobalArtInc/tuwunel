@@ -7,7 +7,7 @@ use super::{
 	APPSERVICE_CAP, Api, Build, BuildPath, CacheSample, Condition, Counter, DynFamily,
 	EnumFamily, Fastpath, Gauge, Histogram, JournalKind, Lookup, MAX_KEY_LEN, Metric, OTHER, Op,
 	PROVIDER_CAP, Pass, Phase, Registry, Reply, RocksSample, Scale, Section, SendResult,
-	SinceKind, WatchPart, Writer,
+	SinceKind, Verdict, WakeReason, WatchPart, Writer,
 };
 use crate::label_set;
 
@@ -38,6 +38,8 @@ const ALLOWED_LABELS: &[&str] = &[
 	"appservice",
 	"kind",
 	"how",
+	"verdict",
+	"reason",
 	"result",
 	"pool",
 	"provider",
@@ -889,6 +891,59 @@ fn sync_journal_waits_count_the_changes_they_pass_and_their_lookups_by_way() {
 		"tuwunel_sync_v3_wait_scanned_total 42\n",
 		"tuwunel_sync_v3_wait_lookups_total{how=\"room\"} 2\n",
 		"tuwunel_sync_v3_wait_lookups_total{how=\"set\"} 1\n",
+	] {
+		assert!(text.contains(line), "{line}\n{text}");
+	}
+
+	assert!(parsed.samples <= registry.max_series());
+}
+
+#[test]
+fn sync_journal_wait_verdicts_are_counted_per_verdict() {
+	let registry = Registry::new();
+	let group = &registry.sync;
+
+	group.wait_verified(Verdict::Miss);
+	group.wait_verified(Verdict::Miss);
+	group.wait_verified(Verdict::Quiet);
+
+	assert_eq!(group.wait_verified_total(Verdict::Miss), 2);
+	assert_eq!(group.wait_verified_total(Verdict::Quiet), 1);
+	assert_eq!(group.wait_verified_total(Verdict::Both), 0);
+
+	let text = registry.render();
+	let parsed = parse(&text);
+
+	for line in [
+		"tuwunel_sync_v3_wait_verify_total{verdict=\"miss\"} 2\n",
+		"tuwunel_sync_v3_wait_verify_total{verdict=\"quiet\"} 1\n",
+		"tuwunel_sync_v3_wait_verify_total{verdict=\"both\"} 0\n",
+	] {
+		assert!(text.contains(line), "{line}\n{text}");
+	}
+
+	assert!(parsed.samples <= registry.max_series());
+}
+
+#[test]
+fn sync_journal_wait_wakes_are_counted_per_reason() {
+	let registry = Registry::new();
+	let group = &registry.sync;
+
+	group.wait_woken(WakeReason::Journal);
+	group.wait_woken(WakeReason::Timeout);
+
+	assert_eq!(group.wait_woken_total(WakeReason::Journal), 1);
+	assert_eq!(group.wait_woken_total(WakeReason::Timeout), 1);
+	assert_eq!(group.wait_woken_total(WakeReason::Horizon), 0);
+
+	let text = registry.render();
+	let parsed = parse(&text);
+
+	for line in [
+		"tuwunel_sync_v3_wait_wakes_total{reason=\"journal\"} 1\n",
+		"tuwunel_sync_v3_wait_wakes_total{reason=\"timeout\"} 1\n",
+		"tuwunel_sync_v3_wait_wakes_total{reason=\"horizon\"} 0\n",
 	] {
 		assert!(text.contains(line), "{line}\n{text}");
 	}

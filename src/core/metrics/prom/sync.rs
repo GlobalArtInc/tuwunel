@@ -206,6 +206,37 @@ label_set! {
 	}
 }
 
+label_set! {
+	/// The verdict of one shadow comparison of a wait on the sync journal with
+	/// the database watchers.
+	pub enum Verdict("verdict") {
+		/// The watchers and the journal both saw a change.
+		Both => "both",
+		/// Only the watchers saw a change, so the journal would have missed it.
+		Miss => "miss",
+		/// The watchers fired, and the journal holds no change for the user.
+		WatcherSpurious => "watcher_spurious",
+		/// The journal saw a change, and the watchers did not fire.
+		JournalExtra => "journal_extra",
+		/// Neither the watchers nor the journal saw a change.
+		Quiet => "quiet",
+	}
+}
+
+label_set! {
+	/// Why a long poll that waits through the sync journal ended.
+	pub enum WakeReason("reason") {
+		/// A change in the journal woke the poll.
+		Journal => "journal",
+		/// The journal dropped changes after the point the poll started from.
+		Horizon => "horizon",
+		/// The timeout of the request ran out.
+		Timeout => "timeout",
+		/// The server is stopping.
+		Shutdown => "shutdown",
+	}
+}
+
 /// Metrics of the sync endpoints.
 pub struct SyncMetrics {
 	v3_build: EnumFamily<SinceKind, Histogram<15>>,
@@ -228,6 +259,8 @@ pub struct SyncMetrics {
 	journal_misses: EnumFamily<JournalKind, Counter>,
 	wait_scanned: Counter,
 	wait_lookups: EnumFamily<Lookup, Counter>,
+	wait_verify: EnumFamily<Verdict, Counter>,
+	wait_wakes: EnumFamily<WakeReason, Counter>,
 	long_polls: EnumFamily<Api, Gauge>,
 	v5_pass: EnumFamily<Pass, Histogram<15>>,
 	v5_connections_loaded: Gauge,
@@ -270,6 +303,8 @@ impl SyncMetrics {
 			journal_misses: EnumFamily::new(Counter::new),
 			wait_scanned: Counter::new(),
 			wait_lookups: EnumFamily::new(Counter::new),
+			wait_verify: EnumFamily::new(Counter::new),
+			wait_wakes: EnumFamily::new(Counter::new),
 			long_polls: EnumFamily::new(Gauge::new),
 			v5_pass: EnumFamily::new(|| Histogram::seconds(&SECONDS)),
 			v5_connections_loaded: Gauge::new(),
@@ -382,6 +417,15 @@ impl SyncMetrics {
 	/// Counts one way a wait on the sync journal found out whether the user is in
 	/// a room.
 	pub fn wait_lookup(&self, how: Lookup) { self.wait_lookups.get(how).inc(); }
+
+	#[inline]
+	/// Counts the verdict of one shadow comparison of a wait on the sync journal
+	/// with the database watchers.
+	pub fn wait_verified(&self, verdict: Verdict) { self.wait_verify.get(verdict).inc(); }
+
+	#[inline]
+	/// Counts why a long poll that waits through the sync journal ended.
+	pub fn wait_woken(&self, reason: WakeReason) { self.wait_wakes.get(reason).inc(); }
 
 	#[inline]
 	/// Counts a request as waiting for activity until the guard is dropped.
@@ -513,6 +557,18 @@ impl SyncMetrics {
 	#[must_use]
 	/// Returns the number of membership lookups waits have made in a way.
 	pub fn wait_lookups_total(&self, how: Lookup) -> u64 { self.wait_lookups.get(how).get() }
+
+	#[must_use]
+	/// Returns the number of shadow verdicts counted for a verdict.
+	pub fn wait_verified_total(&self, verdict: Verdict) -> u64 {
+		self.wait_verify.get(verdict).get()
+	}
+
+	#[must_use]
+	/// Returns the number of long polls that ended for a reason.
+	pub fn wait_woken_total(&self, reason: WakeReason) -> u64 {
+		self.wait_wakes.get(reason).get()
+	}
 
 	#[must_use]
 	/// Returns the number of requests waiting for activity on an API.
@@ -703,6 +759,18 @@ impl SyncMetrics {
 			 room looked up on its own, set for the list of every room the user is in loaded.",
 			&self.wait_lookups,
 		);
+		w.metric(
+			"tuwunel_sync_v3_wait_verify_total",
+			"Verdicts of the shadow comparison of the sync journal with the database watchers, \
+			 by verdict; miss means the journal would have let a long poll sleep through a \
+			 change.",
+			&self.wait_verify,
+		);
+		w.metric(
+			"tuwunel_sync_v3_wait_wakes_total",
+			"Why a long poll that waits through the sync journal ended, by reason.",
+			&self.wait_wakes,
+		);
 	}
 
 	pub(super) fn series(&self) -> usize {
@@ -727,6 +795,8 @@ impl SyncMetrics {
 			self.journal_misses.series(),
 			self.wait_scanned.series(),
 			self.wait_lookups.series(),
+			self.wait_verify.series(),
+			self.wait_wakes.series(),
 			self.long_polls.series(),
 			self.v5_pass.series(),
 			self.v5_connections_loaded.series(),
