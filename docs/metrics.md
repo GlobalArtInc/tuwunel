@@ -210,9 +210,10 @@ shadow comparison of `journal_wait_verify` reads the journal without adding to t
 `tuwunel_sync_v3_wait_verify_total` counts the verdicts of the shadow comparison of the
 sync journal with the database watchers, by `verdict`: `miss` means the journal would
 have let a long poll sleep through a change. It is counted only while
-`journal_wait_verify` is on. `tuwunel_sync_v3_wait_wakes_total` counts why a long poll
-that waits through the journal ended, by `reason`, and is counted only while
-`journal_wait` is on.
+`journal_wait_verify` is on, and a comparison with no verdict is skipped when the journal no
+longer covers the position the wait began from. `tuwunel_sync_v3_wait_wakes_total` counts why
+a long poll that waits through the journal ended, by `reason`, and is counted only while
+`journal_wait` is on and `journal_wait_verify` is off.
 
 ### Database
 
