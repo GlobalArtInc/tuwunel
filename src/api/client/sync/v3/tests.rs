@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 
 use ruma::{
 	EventId, OwnedEventId, UInt,
-	api::client::sync::sync_events::v3::{State as RoomState, StateEvents},
+	api::client::sync::sync_events::v3::{JoinedRoom, Response, State as RoomState, StateEvents},
+	room_id,
+	serde::Raw,
 	uint,
 };
 use tuwunel_core::metrics::prom::Registry;
@@ -20,6 +22,7 @@ use super::{
 		},
 	},
 	stale_since,
+	sync_events::presence_only,
 };
 
 const SINCE: u64 = 100;
@@ -434,4 +437,44 @@ fn every_fastpath_verdict_has_its_own_label() {
 	counted.dedup();
 
 	assert_eq!(counted.len(), verdicts.len(), "two verdicts share a label: {counted:?}");
+}
+
+fn raw_event<T>() -> Raw<T> {
+	Raw::from_json(serde_json::value::to_raw_value(&serde_json::json!({})).unwrap())
+}
+
+fn response_with_presence() -> Response {
+	let mut response = Response::new(NEXT_BATCH.to_string());
+	response.presence.events.push(raw_event());
+
+	response
+}
+
+#[test]
+fn presence_only_response_is_held() {
+	assert!(presence_only(&response_with_presence()));
+}
+
+#[test]
+fn presence_with_a_room_is_not_held() {
+	let mut response = response_with_presence();
+	response
+		.rooms
+		.join
+		.insert(room_id!("!room:example.org").to_owned(), JoinedRoom::new());
+
+	assert!(!presence_only(&response));
+}
+
+#[test]
+fn empty_response_is_not_presence_only() {
+	assert!(!presence_only(&Response::new(NEXT_BATCH.to_string())));
+}
+
+#[test]
+fn presence_with_to_device_is_not_held() {
+	let mut response = response_with_presence();
+	response.to_device.events.push(raw_event());
+
+	assert!(!presence_only(&response));
 }

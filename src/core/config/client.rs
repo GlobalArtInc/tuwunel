@@ -112,6 +112,27 @@ pub struct Sync {
 	#[serde(default)]
 	pub fastpath_verify: bool,
 
+	/// Joined-room count from which a legacy sync that has only presence to
+	/// report keeps waiting instead of answering.
+	///
+	/// Every presence update moves the global sync position, so an account in
+	/// thousands of rooms is otherwise answered at once and rebuilt in full
+	/// again and again, for presence of other users alone. With a value above
+	/// 0, an incremental sync of an account with at least this many joined
+	/// rooms whose response would hold nothing but presence continues to wait,
+	/// as after an empty build, until a real change arrives or the timeout
+	/// ends. The cost is that presence of other users does not reach such an
+	/// account until something else in its rooms changes; presence of a
+	/// request that ends this way is dropped, not delivered later. 0 disables
+	/// the mode and leaves every response as it was; a value of 1000 is a
+	/// reasonable start. The value is read on each sync request, so a
+	/// configuration reload takes effect for the next request.
+	///
+	/// reloadable: yes
+	/// default: 0
+	#[serde(default)]
+	pub presence_only_min_rooms: usize,
+
 	/// Joined-room count above which an initial legacy sync caps the timeline
 	/// of every room.
 	///
@@ -165,6 +186,7 @@ impl Default for Sync {
 			calculate_heroes: true_fn(),
 			fastpath: false,
 			fastpath_verify: false,
+			presence_only_min_rooms: 0,
 			initial_large_account_rooms: default_initial_large_account_rooms(),
 			initial_large_account_timeline_limit: default_initial_large_account_timeline_limit(),
 			initial_large_account_stale_gap: default_initial_large_account_stale_gap(),

@@ -129,6 +129,9 @@ label_set! {
 		Data => "data",
 		/// The build had no changes.
 		Empty => "empty",
+		/// The build carried only presence and the account is above
+		/// `presence_only_min_rooms`, so the request kept waiting.
+		PresenceOnly => "presence_only",
 	}
 }
 
@@ -420,7 +423,8 @@ impl SyncMetrics {
 		w.metric(
 			"tuwunel_sync_v3_builds_total",
 			"v3 sync builds by outcome: data when the build had changes to send, empty when it \
-			 had none; a build repeated within one request counts again.",
+			 had none, presence_only when it carried only presence and the request kept \
+			 waiting; a build repeated within one request counts again.",
 			&self.v3_build_outcomes,
 		);
 		w.metric(

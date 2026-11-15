@@ -750,9 +750,11 @@ fn sync_v3_builds_are_counted_per_outcome() {
 	group.v3_build_outcome(Build::Empty);
 	group.v3_build_outcome(Build::Empty);
 	group.v3_build_outcome(Build::Data);
+	group.v3_build_outcome(Build::PresenceOnly);
 
 	assert_eq!(group.v3_outcomes(Build::Empty), 2);
 	assert_eq!(group.v3_outcomes(Build::Data), 1);
+	assert_eq!(group.v3_outcomes(Build::PresenceOnly), 1);
 
 	let text = registry.render();
 	let parsed = parse(&text);
@@ -760,6 +762,7 @@ fn sync_v3_builds_are_counted_per_outcome() {
 	for line in [
 		"tuwunel_sync_v3_builds_total{outcome=\"data\"} 1\n",
 		"tuwunel_sync_v3_builds_total{outcome=\"empty\"} 2\n",
+		"tuwunel_sync_v3_builds_total{outcome=\"presence_only\"} 1\n",
 	] {
 		assert!(text.contains(line), "{line}\n{text}");
 	}

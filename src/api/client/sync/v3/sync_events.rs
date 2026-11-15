@@ -224,6 +224,8 @@ pub(crate) async fn sync_events_route(
 			None
 		};
 
+	let mut presence_only_account: Option<bool> = None;
+
 	let stop_at = sync_deadline(&services, body.body.timeout);
 
 	loop {
@@ -257,20 +259,21 @@ pub(crate) async fn sync_events_route(
 			})
 			.await?;
 
-			let empty = response.rooms.is_empty()
-				&& response.presence.is_empty()
-				&& response.account_data.is_empty()
-				&& response.device_lists.is_empty()
-				&& response.to_device.is_empty()
-				&& response.users.is_empty();
+			let empty = response.presence.is_empty() && none_apart_from_presence(&response);
 
-			if let Some(registry) = registry {
-				registry
-					.sync
-					.v3_build_outcome(if empty { Build::Empty } else { Build::Data });
-			}
+			let held = since.is_some()
+				&& !full_state
+				&& held_presence_only(
+					&services,
+					sender_user,
+					&response,
+					&mut presence_only_account,
+				)
+				.await;
 
-			if !empty || full_state {
+			count_build(registry, empty, held);
+
+			if (!empty && !held) || full_state {
 				answered(Reply::Data);
 				count_sections(registry, &response);
 
@@ -315,6 +318,71 @@ async fn build_timed(
 	let _timer = registry.map(|registry| registry.sync.v3_build(kind));
 
 	build_sync_events(params).await
+}
+
+fn none_apart_from_presence(response: &Response) -> bool {
+	response.rooms.is_empty()
+		&& response.account_data.is_empty()
+		&& response.device_lists.is_empty()
+		&& response.to_device.is_empty()
+		&& response.users.is_empty()
+}
+
+pub(super) fn presence_only(response: &Response) -> bool {
+	!response.presence.is_empty() && none_apart_from_presence(response)
+}
+
+async fn held_presence_only(
+	services: &Services,
+	user_id: &UserId,
+	response: &Response,
+	known: &mut Option<bool>,
+) -> bool {
+	let min_rooms = services
+		.config
+		.client
+		.sync
+		.presence_only_min_rooms;
+
+	if min_rooms == 0 || !presence_only(response) {
+		return false;
+	}
+
+	if let Some(held) = *known {
+		return held;
+	}
+
+	let held = joined_at_least(services, user_id, min_rooms).await;
+
+	*known = Some(held);
+
+	held
+}
+
+fn count_build(registry: Option<&Registry>, empty: bool, held: bool) {
+	let Some(registry) = registry else {
+		return;
+	};
+
+	let outcome = if empty {
+		Build::Empty
+	} else if held {
+		Build::PresenceOnly
+	} else {
+		Build::Data
+	};
+
+	registry.sync.v3_build_outcome(outcome);
+}
+
+async fn joined_at_least(services: &Services, user_id: &UserId, min: usize) -> bool {
+	services
+		.state_cache
+		.rooms_joined(user_id)
+		.take(min)
+		.count()
+		.await
+		>= min
 }
 
 fn count_sections(registry: Option<&Registry>, response: &Response) {

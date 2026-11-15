@@ -138,8 +138,10 @@ wait ended. A request that stops because the server is shutting down releases
 nothing, so it records no `release` observation.
 
 `outcome` on `tuwunel_sync_v3_builds_total` is `data` when a build had changes to
-send and `empty` when it had none. A build repeated within one request, when an
-empty answer sends the request back to wait, counts again.
+send, `empty` when it had none, and `presence_only` when it carried only presence
+and the request kept waiting because of `client.sync.presence_only_min_rooms`. A
+build repeated within one request, when an empty or presence-only answer sends
+the request back to wait, counts again.
 `tuwunel_sync_v3_response_sections_total` counts the sections with data of the
 responses that carry data, so one response can count several. `section` is
 `rooms`, `presence`, `account_data`, `device_lists`, `to_device` or `users`.

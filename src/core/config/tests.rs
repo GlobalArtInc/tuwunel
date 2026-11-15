@@ -543,6 +543,17 @@ fn sync_fastpath_switches_default_off_and_reload() {
 }
 
 #[test]
+fn sync_presence_only_min_rooms_default_off_and_reload() {
+	let default = default_config();
+	let enabled =
+		config_from_toml("[global.client.sync]\npresence_only_min_rooms = 1000\n").unwrap();
+
+	assert_eq!(default.client.sync.presence_only_min_rooms, 0);
+	assert_eq!(enabled.client.sync.presence_only_min_rooms, 1000);
+	reload(&default, &enabled).expect("presence-only threshold should reload");
+}
+
+#[test]
 fn sync_initial_large_account_defaults_and_reload() {
 	let default = default_config();
 	let tuned = config_from_toml(
