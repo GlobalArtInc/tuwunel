@@ -13,6 +13,7 @@ const DEFAULT_TIMELINE_LIMIT: usize = 10;
 
 mod joined;
 mod left;
+mod phase;
 mod state;
 mod sync_events;
 

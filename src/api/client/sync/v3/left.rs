@@ -45,7 +45,7 @@ use crate::{ignored_filter, is_empty_account_data_event, with_membership};
 
 type TimelineEventIds = SmallVec<[OwnedEventId; 1]>;
 
-pub(super) fn collect_rooms<'a>(
+pub(super) async fn collect_rooms<'a>(
 	services: &'a Services,
 	sender_user: &'a UserId,
 	since: u64,
@@ -53,10 +53,12 @@ pub(super) fn collect_rooms<'a>(
 	full_state: bool,
 	state_after: StateAfter,
 	filter: &'a FilterDefinition,
-) -> impl Future<Output = BTreeMap<OwnedRoomId, LeftRoom>> + Send + 'a {
-	services
+) -> BTreeMap<OwnedRoomId, LeftRoom> {
+	let mut departed: u64 = 0;
+	let left_rooms = services
 		.state_cache
 		.rooms_departed(sender_user)
+		.inspect(|_| departed = departed.saturating_add(1))
 		.ready_filter(|room_id| filter.room.matches(room_id))
 		.map(ToOwned::to_owned)
 		.broad_filter_map(move |room_id| {
@@ -75,6 +77,13 @@ pub(super) fn collect_rooms<'a>(
 		})
 		.ready_filter_map(|(room_id, left_room)| left_room.map(|left_room| (room_id, left_room)))
 		.collect()
+		.await;
+
+	if let Some(registry) = services.server.metrics.prometheus() {
+		registry.sync.v3_left_rooms_per_sync(departed);
+	}
+
+	left_rooms
 }
 
 #[tracing::instrument(

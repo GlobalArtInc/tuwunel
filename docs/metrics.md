@@ -99,6 +99,12 @@ shares the `_other` series.
 | `tuwunel_sync_v3_responses_total` | counter | `since`, `outcome` |
 | `tuwunel_sync_v3_rooms_total` | counter | `fastpath` |
 | `tuwunel_sync_v3_rooms_per_sync` | histogram | none |
+| `tuwunel_sync_v3_phase_seconds` | histogram | `phase` |
+| `tuwunel_sync_v3_watch_seconds` | histogram | `part` |
+| `tuwunel_sync_v3_watchers_per_sync` | histogram | none |
+| `tuwunel_sync_v3_builds_total` | counter | `outcome` |
+| `tuwunel_sync_v3_response_sections_total` | counter | `section` |
+| `tuwunel_sync_v3_left_rooms_per_sync` | histogram | none |
 | `tuwunel_sync_fastpath_mismatches_total` | counter | none |
 | `tuwunel_sync_v5_pass_seconds` | histogram | `pass` |
 | `tuwunel_sync_v5_response_rooms` | histogram | none |
@@ -115,6 +121,30 @@ watchers fired. `tuwunel_sync_fastpath_mismatches_total` should stay at zero; a
 nonzero value means the fast path disagreed with the full computation.
 `tuwunel_sync_v5_connection_state_bytes` leaves out the empty state stored when
 a client resets its connection.
+
+`phase` on `tuwunel_sync_v3_phase_seconds` is `joined`, `left`, `invited` (invited
+and knocked rooms), `presence`, `account_data`, `e2ee` (to-device events, device
+keys and one-time key counts) or `profiles` (device lists of users who left, and
+profiles). The parts of one build are polled in turn inside one task, so each
+observation is the busy time of a part: the time spent inside its own polls, not
+the time from start to end. The sum over the parts is not the time of a request.
+The `e2ee` and `profiles` parts record each of their futures, so they add more
+than one observation per build; the device parts are skipped when the request
+has no device.
+
+`part` on `tuwunel_sync_v3_watch_seconds` is `register` for the time to register
+the watchers of a v3 request, and `release` for the time to drop them after the
+wait ended. A request that stops because the server is shutting down releases
+nothing, so it records no `release` observation.
+
+`outcome` on `tuwunel_sync_v3_builds_total` is `data` when a build had changes to
+send and `empty` when it had none. A build repeated within one request, when an
+empty answer sends the request back to wait, counts again.
+`tuwunel_sync_v3_response_sections_total` counts the sections with data of the
+responses that carry data, so one response can count several. `section` is
+`rooms`, `presence`, `account_data`, `device_lists`, `to_device` or `users`.
+`tuwunel_sync_v3_left_rooms_per_sync` counts the departed rooms one build walked,
+before the room filter.
 
 ### Database
 

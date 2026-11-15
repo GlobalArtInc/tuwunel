@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use futures::{
 	FutureExt, Stream, StreamExt,
 	future::BoxFuture,
@@ -5,7 +7,7 @@ use futures::{
 	stream::{self, FuturesUnordered},
 };
 use ruma::{DeviceId, OwnedRoomId, RoomId, UserId};
-use tuwunel_core::{implement, trace, utils::stream::BroadbandExt};
+use tuwunel_core::{implement, metrics::prom::WatchPart, trace, utils::stream::BroadbandExt};
 use tuwunel_database::{Interfix, Separator, serialize_key};
 
 use crate::rooms::short::ShortRoomId;
@@ -44,6 +46,7 @@ pub async fn watch<'a, Rooms>(
 where
 	Rooms: Stream<Item = &'a RoomId> + Send + 'a,
 {
+	let entered = Instant::now();
 	let userid_prefix =
 		serialize_key((user_id, Interfix)).expect("failed to serialize watch prefix");
 
@@ -183,6 +186,13 @@ where
 	// Server shutdown
 	futures.push(self.services.server.until_shutdown().boxed());
 
+	if let Some(registry) = self.services.server.metrics.prometheus() {
+		registry.sync.v3_watchers_per_sync(futures.len());
+		registry
+			.sync
+			.v3_watch(WatchPart::Register, entered.elapsed());
+	}
+
 	async move {
 		if !self.services.server.is_running() {
 			return;
@@ -191,5 +201,14 @@ where
 		trace!(futures = futures.len(), "watch started");
 		futures.next().await;
 		trace!(futures = futures.len(), "watch finished");
+
+		let released = Instant::now();
+		drop(futures);
+
+		if let Some(registry) = self.services.server.metrics.prometheus() {
+			registry
+				.sync
+				.v3_watch(WatchPart::Release, released.elapsed());
+		}
 	}
 }

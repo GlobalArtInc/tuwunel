@@ -32,7 +32,7 @@ use tuwunel_core::{
 	debug::INFO_SPAN_LEVEL,
 	error::inspect_log,
 	extract_variant,
-	metrics::prom::{Api, Registry, Reply, SinceKind},
+	metrics::prom::{Api, Build, Phase, Registry, Reply, Section, SinceKind},
 	trace,
 	utils::{
 		BoolExt, IterStream, ReadyExt, TryFutureExtExt,
@@ -50,7 +50,9 @@ use super::{
 	Since, StateAfter, capped_timeline_limit,
 	joined::fastpath::{Tally, load_room_or_skip},
 	left::collect_rooms as collect_left_rooms,
-	log_future_since, stale_since,
+	log_future_since,
+	phase::timed,
+	stale_since,
 };
 use crate::{
 	ClientIp, Ruma, is_empty_account_data_event,
@@ -262,8 +264,15 @@ pub(crate) async fn sync_events_route(
 				&& response.to_device.is_empty()
 				&& response.users.is_empty();
 
+			if let Some(registry) = registry {
+				registry
+					.sync
+					.v3_build_outcome(if empty { Build::Empty } else { Build::Data });
+			}
+
 			if !empty || full_state {
 				answered(Reply::Data);
+				count_sections(registry, &response);
 
 				return Ok(response);
 			}
@@ -306,6 +315,34 @@ async fn build_timed(
 	let _timer = registry.map(|registry| registry.sync.v3_build(kind));
 
 	build_sync_events(params).await
+}
+
+fn count_sections(registry: Option<&Registry>, response: &Response) {
+	let Some(registry) = registry else {
+		return;
+	};
+
+	let rooms = &response.rooms;
+	let sections = [
+		(
+			Section::Rooms,
+			!rooms.join.is_empty()
+				|| !rooms.leave.is_empty()
+				|| !rooms.invite.is_empty()
+				|| !rooms.knock.is_empty(),
+		),
+		(Section::Presence, !response.presence.is_empty()),
+		(Section::AccountData, !response.account_data.is_empty()),
+		(Section::DeviceLists, !response.device_lists.is_empty()),
+		(Section::ToDevice, !response.to_device.is_empty()),
+		(Section::Users, !response.users.is_empty()),
+	];
+
+	for (section, present) in sections {
+		if present {
+			registry.sync.v3_section(section);
+		}
+	}
 }
 
 async fn initial_capped_filter(
@@ -414,6 +451,7 @@ async fn build_empty_response(
 		count = ?services.globals.pending_count(),
     )
 )]
+#[expect(clippy::too_many_lines)]
 async fn build_sync_events(
 	Params {
 		services,
@@ -428,79 +466,123 @@ async fn build_sync_events(
 ) -> Result<Response> {
 	let profile_since = since;
 	let since = since.unwrap_or(0);
+	let registry = services.server.metrics.prometheus();
 
 	// MSC4155: a stored invite whose sender the recipient ignores or blocks is
 	// withheld here, and relaxing the configuration re-exposes it.
 	let invite_filter = services.users.invite_filter(sender_user).await;
 
-	let joined_rooms = collect_joined_rooms(
-		services,
-		sender_user,
-		sender_device,
-		since,
-		next_batch,
-		full_state,
-		state_after,
-		filter,
+	let joined_rooms = timed(
+		registry,
+		Phase::Joined,
+		collect_joined_rooms(
+			services,
+			sender_user,
+			sender_device,
+			since,
+			next_batch,
+			full_state,
+			state_after,
+			filter,
+		),
 	);
 
-	let left_rooms = collect_left_rooms(
-		services,
-		sender_user,
-		since,
-		next_batch,
-		full_state,
-		state_after,
-		filter,
+	let left_rooms = timed(
+		registry,
+		Phase::Left,
+		collect_left_rooms(
+			services,
+			sender_user,
+			since,
+			next_batch,
+			full_state,
+			state_after,
+			filter,
+		),
 	);
 
-	let invited_rooms =
-		collect_invited_rooms(services, sender_user, since, next_batch, filter, &invite_filter);
+	let invited_rooms = timed(
+		registry,
+		Phase::Invited,
+		collect_invited_rooms(services, sender_user, since, next_batch, filter, &invite_filter),
+	);
 
-	let knocked_rooms = collect_knocked_rooms(services, sender_user, since, next_batch, filter);
+	let knocked_rooms = timed(
+		registry,
+		Phase::Invited,
+		collect_knocked_rooms(services, sender_user, since, next_batch, filter),
+	);
 
 	let presence_updates = services
 		.config
 		.presence
 		.allow_local
 		.then_async(|| {
-			process_presence_updates(services, since, next_batch, sender_user, filter)
+			timed(
+				registry,
+				Phase::Presence,
+				process_presence_updates(services, since, next_batch, sender_user, filter),
+			)
 		});
 
-	let account_data = collect_global_account_data(services, sender_user, since, next_batch);
+	let account_data = timed(
+		registry,
+		Phase::AccountData,
+		collect_global_account_data(services, sender_user, since, next_batch),
+	);
 
-	let keys_changed = services
-		.users
-		.keys_changed(sender_user, since, Some(next_batch))
-		.map(ToOwned::to_owned)
-		.collect::<HashSet<_>>();
-
-	let to_device_events = sender_device.map_async(|sender_device| {
+	let keys_changed = timed(
+		registry,
+		Phase::E2ee,
 		services
 			.users
-			.get_to_device_events(sender_user, sender_device, Some(since), Some(next_batch))
-			.map(at!(1))
-			.collect::<Vec<_>>()
+			.keys_changed(sender_user, since, Some(next_batch))
+			.map(ToOwned::to_owned)
+			.collect::<HashSet<_>>(),
+	);
+
+	let to_device_events = sender_device.map_async(|sender_device| {
+		timed(
+			registry,
+			Phase::E2ee,
+			services
+				.users
+				.get_to_device_events(sender_user, sender_device, Some(since), Some(next_batch))
+				.map(at!(1))
+				.collect::<Vec<_>>(),
+		)
 	});
 
 	let device_one_time_keys_count = sender_device.map_async(|sender_device| {
-		services
-			.users
-			.count_one_time_keys(sender_user, sender_device)
+		timed(
+			registry,
+			Phase::E2ee,
+			services
+				.users
+				.count_one_time_keys(sender_user, sender_device),
+		)
 	});
 
 	let device_unused_fallback_key_types = sender_device.map_async(|sender_device| {
-		services
-			.users
-			.unused_fallback_key_algorithms(sender_user, sender_device)
-			.collect::<Vec<_>>()
+		timed(
+			registry,
+			Phase::E2ee,
+			services
+				.users
+				.unused_fallback_key_algorithms(sender_user, sender_device)
+				.collect::<Vec<_>>(),
+		)
 	});
 
 	// Remove all to-device events the device received *last time*
 	let remove_to_device_events = sender_device.map_async(|sender_device| {
-		services
-			.users
-			.remove_to_device_events(sender_user, sender_device, since)
+		timed(
+			registry,
+			Phase::E2ee,
+			services
+				.users
+				.remove_to_device_events(sender_user, sender_device, since),
+		)
 	});
 
 	let (
@@ -540,8 +622,16 @@ async fn build_sync_events(
 
 	// The profile reads and the left-device fan-out both pend on the pool.
 	let (device_list_left, users) = join(
-		collect_device_list_left(services, sender_user, left_encrypted_users),
-		collect_profiles(services, sender_user, profile_since, next_batch, filter, &rooms),
+		timed(
+			registry,
+			Phase::Profiles,
+			collect_device_list_left(services, sender_user, left_encrypted_users),
+		),
+		timed(
+			registry,
+			Phase::Profiles,
+			collect_profiles(services, sender_user, profile_since, next_batch, filter, &rooms),
+		),
 	)
 	.await;
 

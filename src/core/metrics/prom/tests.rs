@@ -4,9 +4,9 @@ use futures::FutureExt;
 use regex::Regex;
 
 use super::{
-	APPSERVICE_CAP, Api, CacheSample, Condition, Counter, DynFamily, EnumFamily, Fastpath, Gauge,
-	Histogram, MAX_KEY_LEN, Metric, OTHER, Op, PROVIDER_CAP, Pass, Registry, Reply, RocksSample,
-	Scale, SendResult, SinceKind, Writer,
+	APPSERVICE_CAP, Api, Build, CacheSample, Condition, Counter, DynFamily, EnumFamily, Fastpath,
+	Gauge, Histogram, MAX_KEY_LEN, Metric, OTHER, Op, PROVIDER_CAP, Pass, Phase, Registry, Reply,
+	RocksSample, Scale, Section, SendResult, SinceKind, WatchPart, Writer,
 };
 use crate::label_set;
 
@@ -30,6 +30,9 @@ const ALLOWED_LABELS: &[&str] = &[
 	"outcome",
 	"fastpath",
 	"pass",
+	"phase",
+	"part",
+	"section",
 	"appservice",
 	"kind",
 	"result",
@@ -658,6 +661,156 @@ fn sync_v5_is_counted_per_pass_and_stored_readings_wait_for_a_value() {
 		"tuwunel_sync_v5_connections_loaded 7\n",
 		"tuwunel_sync_v5_connections_stored 9\n",
 		"tuwunel_sync_v5_store_bytes 4096\n",
+	] {
+		assert!(text.contains(line), "{line}\n{text}");
+	}
+
+	assert!(parsed.samples <= registry.max_series());
+}
+
+#[test]
+fn sync_v3_phases_are_timed_per_part() {
+	let registry = Registry::new();
+	let group = &registry.sync;
+
+	group.v3_phase(Phase::Joined, Duration::from_millis(30));
+	group.v3_phase(Phase::E2ee, Duration::from_millis(1));
+	group.v3_phase(Phase::E2ee, Duration::from_millis(2));
+
+	assert_eq!(group.v3_phases(Phase::Joined), 1);
+	assert_eq!(group.v3_phases(Phase::E2ee), 2);
+	assert_eq!(group.v3_phases(Phase::Left), 0);
+
+	let text = registry.render();
+	let parsed = parse(&text);
+
+	for line in [
+		"tuwunel_sync_v3_phase_seconds_count{phase=\"joined\"} 1\n",
+		"tuwunel_sync_v3_phase_seconds_count{phase=\"e2ee\"} 2\n",
+		"tuwunel_sync_v3_phase_seconds_bucket{phase=\"joined\",le=\"0.05\"} 1\n",
+	] {
+		assert!(text.contains(line), "{line}\n{text}");
+	}
+
+	assert!(parsed.samples <= registry.max_series());
+}
+
+#[test]
+fn sync_v3_watch_is_timed_per_part() {
+	let registry = Registry::new();
+	let group = &registry.sync;
+
+	group.v3_watch(WatchPart::Register, Duration::from_millis(3));
+	group.v3_watch(WatchPart::Release, Duration::from_secs(2));
+
+	assert_eq!(group.v3_watches(WatchPart::Register), 1);
+	assert_eq!(group.v3_watches(WatchPart::Release), 1);
+
+	let text = registry.render();
+	let parsed = parse(&text);
+
+	for line in [
+		"tuwunel_sync_v3_watch_seconds_count{part=\"register\"} 1\n",
+		"tuwunel_sync_v3_watch_seconds_bucket{part=\"release\",le=\"2.5\"} 1\n",
+	] {
+		assert!(text.contains(line), "{line}\n{text}");
+	}
+
+	assert!(parsed.samples <= registry.max_series());
+}
+
+#[test]
+fn sync_v3_watchers_are_counted_per_sync() {
+	let registry = Registry::new();
+	let group = &registry.sync;
+
+	group.v3_watchers_per_sync(60);
+
+	assert_eq!(group.v3_watcher_syncs(), 1);
+
+	let text = registry.render();
+	let parsed = parse(&text);
+
+	for line in [
+		"tuwunel_sync_v3_watchers_per_sync_bucket{le=\"50\"} 0\n",
+		"tuwunel_sync_v3_watchers_per_sync_bucket{le=\"100\"} 1\n",
+		"tuwunel_sync_v3_watchers_per_sync_count 1\n",
+	] {
+		assert!(text.contains(line), "{line}\n{text}");
+	}
+
+	assert!(parsed.samples <= registry.max_series());
+}
+
+#[test]
+fn sync_v3_builds_are_counted_per_outcome() {
+	let registry = Registry::new();
+	let group = &registry.sync;
+
+	group.v3_build_outcome(Build::Empty);
+	group.v3_build_outcome(Build::Empty);
+	group.v3_build_outcome(Build::Data);
+
+	assert_eq!(group.v3_outcomes(Build::Empty), 2);
+	assert_eq!(group.v3_outcomes(Build::Data), 1);
+
+	let text = registry.render();
+	let parsed = parse(&text);
+
+	for line in [
+		"tuwunel_sync_v3_builds_total{outcome=\"data\"} 1\n",
+		"tuwunel_sync_v3_builds_total{outcome=\"empty\"} 2\n",
+	] {
+		assert!(text.contains(line), "{line}\n{text}");
+	}
+
+	assert!(parsed.samples <= registry.max_series());
+}
+
+#[test]
+fn sync_v3_sections_with_data_are_counted_per_section() {
+	let registry = Registry::new();
+	let group = &registry.sync;
+
+	group.v3_section(Section::Rooms);
+	group.v3_section(Section::Presence);
+	group.v3_section(Section::Rooms);
+
+	assert_eq!(group.v3_sections_counted(Section::Rooms), 2);
+	assert_eq!(group.v3_sections_counted(Section::Users), 0);
+
+	let text = registry.render();
+	let parsed = parse(&text);
+
+	for line in [
+		"tuwunel_sync_v3_response_sections_total{section=\"rooms\"} 2\n",
+		"tuwunel_sync_v3_response_sections_total{section=\"presence\"} 1\n",
+		"tuwunel_sync_v3_response_sections_total{section=\"users\"} 0\n",
+	] {
+		assert!(text.contains(line), "{line}\n{text}");
+	}
+
+	assert!(parsed.samples <= registry.max_series());
+}
+
+#[test]
+fn sync_v3_left_rooms_are_counted_per_build() {
+	let registry = Registry::new();
+	let group = &registry.sync;
+
+	group.v3_left_rooms_per_sync(0);
+	group.v3_left_rooms_per_sync(12);
+
+	assert_eq!(group.v3_left_syncs(), 2);
+
+	let text = registry.render();
+	let parsed = parse(&text);
+
+	for line in [
+		"tuwunel_sync_v3_left_rooms_per_sync_bucket{le=\"0\"} 1\n",
+		"tuwunel_sync_v3_left_rooms_per_sync_bucket{le=\"10\"} 1\n",
+		"tuwunel_sync_v3_left_rooms_per_sync_bucket{le=\"20\"} 2\n",
+		"tuwunel_sync_v3_left_rooms_per_sync_count 2\n",
 	] {
 		assert!(text.contains(line), "{line}\n{text}");
 	}

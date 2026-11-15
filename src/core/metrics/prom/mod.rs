@@ -25,7 +25,9 @@ pub use self::{
 	rocksdb::{CacheSample, Condition, POOL_CAP, RocksSample, Rocksdb},
 	runtime::{Runtime, RuntimeSample},
 	storage::{Op, PROVIDER_CAP, Storage, StoreResult},
-	sync::{Fastpath, LongPoll, Pass, Reply, SinceKind, SyncMetrics},
+	sync::{
+		Build, Fastpath, LongPoll, Pass, Phase, Reply, Section, SinceKind, SyncMetrics, WatchPart,
+	},
 	types::{Counter, Gauge, Histogram, Metric, Seen, Timer},
 	write::{Kind, Le, Scale, Value, Writer, push_label},
 };

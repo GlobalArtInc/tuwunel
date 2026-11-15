@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use super::{
 	family::EnumFamily,
 	http::Api,
@@ -26,6 +28,8 @@ static SECONDS: [u64; 15] = [
 
 static ROOMS: [u64; 15] =
 	[0, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1_000, 2_000, 5_000, 10_000, 20_000];
+
+static WATCHERS: [u64; 10] = [20, 50, 100, 500, 1_000, 5_000, 10_000, 20_000, 50_000, 100_000];
 
 static STATE_BYTES: [u64; 7] = [1 << 10, 1 << 12, 1 << 14, 1 << 16, 1 << 18, 1 << 20, 1 << 22];
 
@@ -88,12 +92,76 @@ label_set! {
 	}
 }
 
+label_set! {
+	/// A part of a v3 sync build, timed by the time spent polling it.
+	pub enum Phase("phase") {
+		/// Joined rooms.
+		Joined => "joined",
+		/// Left rooms.
+		Left => "left",
+		/// Invited and knocked rooms.
+		Invited => "invited",
+		/// Presence updates.
+		Presence => "presence",
+		/// Global account data.
+		AccountData => "account_data",
+		/// Device keys, to-device events and one-time key counts.
+		E2ee => "e2ee",
+		/// Device lists of users who left and user profiles.
+		Profiles => "profiles",
+	}
+}
+
+label_set! {
+	/// Which half of the watcher lifecycle of a v3 sync request was timed.
+	pub enum WatchPart("part") {
+		/// Registering the watchers before the wait.
+		Register => "register",
+		/// Releasing the watchers once the wait ended.
+		Release => "release",
+	}
+}
+
+label_set! {
+	/// Whether a v3 sync build had changes to send.
+	pub enum Build("outcome") {
+		/// The build had changes.
+		Data => "data",
+		/// The build had no changes.
+		Empty => "empty",
+	}
+}
+
+label_set! {
+	/// A section of a v3 sync response that carries data.
+	pub enum Section("section") {
+		/// Joined, left, invited or knocked rooms.
+		Rooms => "rooms",
+		/// Presence updates.
+		Presence => "presence",
+		/// Global account data.
+		AccountData => "account_data",
+		/// Device list changes and departures.
+		DeviceLists => "device_lists",
+		/// To-device events.
+		ToDevice => "to_device",
+		/// User profiles.
+		Users => "users",
+	}
+}
+
 /// Metrics of the sync endpoints.
 pub struct SyncMetrics {
 	v3_build: EnumFamily<SinceKind, Histogram<15>>,
 	v3_responses: EnumFamily<(SinceKind, Reply), Counter>,
 	v3_rooms: EnumFamily<Fastpath, Counter>,
 	v3_rooms_per_sync: Histogram<15>,
+	v3_phase: EnumFamily<Phase, Histogram<15>>,
+	v3_watch: EnumFamily<WatchPart, Histogram<15>>,
+	v3_watchers_per_sync: Histogram<10>,
+	v3_build_outcomes: EnumFamily<Build, Counter>,
+	v3_sections: EnumFamily<Section, Counter>,
+	v3_left_rooms_per_sync: Histogram<15>,
 	fastpath_mismatches: Counter,
 	long_polls: EnumFamily<Api, Gauge>,
 	v5_pass: EnumFamily<Pass, Histogram<15>>,
@@ -121,6 +189,12 @@ impl SyncMetrics {
 			v3_responses: EnumFamily::new(Counter::new),
 			v3_rooms: EnumFamily::new(Counter::new),
 			v3_rooms_per_sync: Histogram::new(&ROOMS),
+			v3_phase: EnumFamily::new(|| Histogram::seconds(&SECONDS)),
+			v3_watch: EnumFamily::new(|| Histogram::seconds(&SECONDS)),
+			v3_watchers_per_sync: Histogram::new(&WATCHERS),
+			v3_build_outcomes: EnumFamily::new(Counter::new),
+			v3_sections: EnumFamily::new(Counter::new),
+			v3_left_rooms_per_sync: Histogram::new(&ROOMS),
 			fastpath_mismatches: Counter::new(),
 			long_polls: EnumFamily::new(Gauge::new),
 			v5_pass: EnumFamily::new(|| Histogram::seconds(&SECONDS)),
@@ -153,6 +227,39 @@ impl SyncMetrics {
 	#[inline]
 	/// Records how many joined rooms one v3 build looked at.
 	pub fn v3_rooms_per_sync(&self, rooms: u64) { self.v3_rooms_per_sync.observe(rooms); }
+
+	#[inline]
+	/// Records the time one part of a v3 build spent polling.
+	pub fn v3_phase(&self, phase: Phase, busy: Duration) {
+		self.v3_phase.get(phase).observe_duration(busy);
+	}
+
+	#[inline]
+	/// Records the time one half of the watcher lifecycle of a v3 request took.
+	pub fn v3_watch(&self, part: WatchPart, elapsed: Duration) {
+		self.v3_watch.get(part).observe_duration(elapsed);
+	}
+
+	#[inline]
+	/// Records how many watchers one v3 request registered.
+	pub fn v3_watchers_per_sync(&self, watchers: usize) {
+		self.v3_watchers_per_sync
+			.observe(u64::try_from(watchers).unwrap_or(u64::MAX));
+	}
+
+	#[inline]
+	/// Counts one v3 build by whether it had changes to send.
+	pub fn v3_build_outcome(&self, build: Build) { self.v3_build_outcomes.get(build).inc(); }
+
+	#[inline]
+	/// Counts one section that carries data in a v3 response.
+	pub fn v3_section(&self, section: Section) { self.v3_sections.get(section).inc(); }
+
+	#[inline]
+	/// Records how many left rooms one v3 build walked, before the room filter.
+	pub fn v3_left_rooms_per_sync(&self, rooms: u64) {
+		self.v3_left_rooms_per_sync.observe(rooms);
+	}
 
 	#[inline]
 	/// Counts a room where the verified fast path disagreed with the full
@@ -220,6 +327,33 @@ impl SyncMetrics {
 	pub fn v3_builds(&self, since: SinceKind) -> u64 { self.v3_build.get(since).count() }
 
 	#[must_use]
+	/// Returns the number of busy time observations recorded for a part of a v3
+	/// build.
+	pub fn v3_phases(&self, phase: Phase) -> u64 { self.v3_phase.get(phase).count() }
+
+	#[must_use]
+	/// Returns the number of watcher lifecycle times recorded for a half of it.
+	pub fn v3_watches(&self, part: WatchPart) -> u64 { self.v3_watch.get(part).count() }
+
+	#[must_use]
+	/// Returns the number of v3 requests whose watchers were counted.
+	pub fn v3_watcher_syncs(&self) -> u64 { self.v3_watchers_per_sync.count() }
+
+	#[must_use]
+	/// Returns the number of v3 builds counted for an outcome.
+	pub fn v3_outcomes(&self, build: Build) -> u64 { self.v3_build_outcomes.get(build).get() }
+
+	#[must_use]
+	/// Returns the number of sections with data counted.
+	pub fn v3_sections_counted(&self, section: Section) -> u64 {
+		self.v3_sections.get(section).get()
+	}
+
+	#[must_use]
+	/// Returns the number of v3 builds whose left rooms were counted.
+	pub fn v3_left_syncs(&self) -> u64 { self.v3_left_rooms_per_sync.count() }
+
+	#[must_use]
 	/// Returns the number of fast path mismatches counted.
 	pub fn fastpath_mismatches(&self) -> u64 { self.fastpath_mismatches.get() }
 
@@ -263,6 +397,42 @@ impl SyncMetrics {
 			"tuwunel_sync_v3_rooms_per_sync",
 			"Joined rooms handled by one v3 sync build.",
 			&self.v3_rooms_per_sync,
+		);
+		w.metric(
+			"tuwunel_sync_v3_phase_seconds",
+			"Time one part of a v3 sync build spent polling, by part; the time is the sum of \
+			 the polls of that part, not the wall time, so parts run in one task do not \
+			 overlap. The e2ee and profiles parts record each of their futures, so they add \
+			 more than one observation per build.",
+			&self.v3_phase,
+		);
+		w.metric(
+			"tuwunel_sync_v3_watch_seconds",
+			"Time to register the watchers of one v3 sync request, and to release them once the \
+			 wait ended, by part; a request stopped by shutdown releases nothing.",
+			&self.v3_watch,
+		);
+		w.metric(
+			"tuwunel_sync_v3_watchers_per_sync",
+			"Watchers registered by one v3 sync request.",
+			&self.v3_watchers_per_sync,
+		);
+		w.metric(
+			"tuwunel_sync_v3_builds_total",
+			"v3 sync builds by outcome: data when the build had changes to send, empty when it \
+			 had none; a build repeated within one request counts again.",
+			&self.v3_build_outcomes,
+		);
+		w.metric(
+			"tuwunel_sync_v3_response_sections_total",
+			"Sections with data, counted in the v3 sync responses that carry data; one response \
+			 can count several sections.",
+			&self.v3_sections,
+		);
+		w.metric(
+			"tuwunel_sync_v3_left_rooms_per_sync",
+			"Left rooms one v3 sync build walked, before the room filter.",
+			&self.v3_left_rooms_per_sync,
 		);
 		w.metric(
 			"tuwunel_sync_fastpath_mismatches_total",
@@ -328,6 +498,12 @@ impl SyncMetrics {
 			self.v3_responses.series(),
 			self.v3_rooms.series(),
 			self.v3_rooms_per_sync.series(),
+			self.v3_phase.series(),
+			self.v3_watch.series(),
+			self.v3_watchers_per_sync.series(),
+			self.v3_build_outcomes.series(),
+			self.v3_sections.series(),
+			self.v3_left_rooms_per_sync.series(),
 			self.fastpath_mismatches.series(),
 			self.long_polls.series(),
 			self.v5_pass.series(),
