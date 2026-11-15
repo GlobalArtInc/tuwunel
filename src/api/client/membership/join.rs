@@ -33,6 +33,11 @@ pub(crate) async fn join_room_by_id_route(
 
 	services
 		.membership
+		.check_room_known(sender_user, room_id, None, &[])
+		.await?;
+
+	services
+		.membership
 		.check_extra_content(sender_user, room_id, extra_content.as_ref())
 		.await?;
 
@@ -96,6 +101,11 @@ pub(crate) async fn join_room_by_id_or_alias_route(
 		.await?;
 
 	let extra_content = extra_member_content(body.json_body.as_ref());
+
+	services
+		.membership
+		.check_room_known(sender_user, &room_id, Some(&body.room_id_or_alias), &servers)
+		.await?;
 
 	services
 		.membership

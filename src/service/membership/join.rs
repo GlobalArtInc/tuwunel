@@ -93,6 +93,9 @@ pub async fn join<'a>(
 	let servers =
 		get_servers_for_room(&self.services, sender_user, room_id, orig_room_id, servers).await?;
 
+	self.refuse_unknown_local_room(sender_user, room_id, &servers)
+		.await?;
+
 	let (federation_lock, state_lock) = self.lock_join(room_id, &servers).await;
 
 	self.check_room_ban(sender_user, room_id).await?;
@@ -159,6 +162,22 @@ pub async fn join<'a>(
 		.await;
 
 	Ok(())
+}
+
+#[implement(Service)]
+#[tracing::instrument(level = "debug", skip_all)]
+pub async fn check_room_known(
+	&self,
+	sender_user: &UserId,
+	room_id: &RoomId,
+	orig_room_id: Option<&RoomOrAliasId>,
+	via: &[OwnedServerName],
+) -> Result {
+	let servers =
+		get_servers_for_room(&self.services, sender_user, room_id, orig_room_id, via).await?;
+
+	self.refuse_unknown_local_room(sender_user, room_id, &servers)
+		.await
 }
 
 /// Refuses `/join` extras that a join would refuse once it is under way.
@@ -255,6 +274,35 @@ async fn lock_join(
 	let (federation_lock, state_lock) = self.lock_join_remote(room_id).await;
 
 	(Some(federation_lock), state_lock)
+}
+
+#[implement(Service)]
+async fn refuse_unknown_local_room(
+	&self,
+	sender_user: &UserId,
+	room_id: &RoomId,
+	servers: &[OwnedServerName],
+) -> Result {
+	if self.is_unknown_local_room(room_id, servers).await {
+		debug_warn!(%sender_user, %room_id, "Room is unknown on this server.");
+
+		return Err!(Request(NotFound("Room not found")));
+	}
+
+	Ok(())
+}
+
+#[implement(Service)]
+async fn is_unknown_local_room(&self, room_id: &RoomId, servers: &[OwnedServerName]) -> bool {
+	let globals = &self.services.globals;
+
+	room_id
+		.server_name()
+		.is_some_and(|name| globals.server_is_ours(name))
+		&& servers
+			.iter()
+			.all(|server| globals.server_is_ours(server))
+		&& !self.services.metadata.exists(room_id).await
 }
 
 #[implement(Service)]
