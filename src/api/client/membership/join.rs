@@ -1,9 +1,12 @@
 use axum::extract::State;
 use ruma::{
 	CanonicalJsonObject, CanonicalJsonValue, RoomId,
-	api::client::membership::{join_room_by_id, join_room_by_id_or_alias},
+	api::{
+		client::membership::{join_room_by_id, join_room_by_id_or_alias},
+		error::ErrorKind,
+	},
 };
-use tuwunel_core::{Result, warn};
+use tuwunel_core::{Error, Result, warn};
 use tuwunel_service::membership::{Join, is_reserved_join_key};
 
 use super::banned_room_check;
@@ -50,6 +53,10 @@ pub(crate) async fn join_room_by_id_route(
 		})
 		.await
 	{
+		if is_refusal(&e) {
+			return Err(e);
+		}
+
 		errors = errors.saturating_add(1);
 		if services
 			.config
@@ -116,6 +123,10 @@ pub(crate) async fn join_room_by_id_or_alias_route(
 		})
 		.await
 	{
+		if is_refusal(&e) {
+			return Err(e);
+		}
+
 		errors = errors.saturating_add(1);
 		if services
 			.config
@@ -134,6 +145,8 @@ pub(crate) async fn join_room_by_id_or_alias_route(
 
 	Ok(join_room_by_id_or_alias::v3::Response { room_id: room_id.clone() })
 }
+
+fn is_refusal(error: &Error) -> bool { matches!(error, Error::Request(ErrorKind::NotFound, ..)) }
 
 // Drop recognized and server-owned keys the client must not set.
 fn extra_member_content(json_body: Option<&CanonicalJsonValue>) -> Option<CanonicalJsonObject> {
