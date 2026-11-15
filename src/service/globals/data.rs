@@ -6,7 +6,7 @@
 use std::{ops::Range, sync::Arc};
 
 use futures::TryFutureExt;
-use tokio::sync::watch::Sender;
+use tokio::sync::watch::{Receiver, Sender};
 use tuwunel_core::{
 	Result, err, implement, utils,
 	utils::two_phase_counter::{Counter as TwoPhaseCounter, Permit as TwoPhasePermit},
@@ -88,6 +88,14 @@ impl Data {
 			.map_err(|e| err!(debug_error!("counter channel error {e:?}")))
 			.await
 	}
+
+	/// Subscribes to the retirement frontier.
+	///
+	/// The receiver counts the current value as seen. Reading it with
+	/// `borrow_and_update` marks that value as seen, and `changed` then completes for
+	/// any retirement after the read, however late it is polled.
+	#[inline]
+	pub(super) fn watch_retired(&self) -> Receiver<u64> { self.retires.subscribe() }
 
 	/// Dispatches the next sequence number and returns its retirement permit.
 	///

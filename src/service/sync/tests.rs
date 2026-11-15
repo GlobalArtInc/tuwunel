@@ -29,6 +29,7 @@ mod journal;
 mod journal_membership;
 mod journal_user;
 mod typing_lag;
+mod wait;
 
 type Filters<'a> = (Option<&'a UserId>, Option<&'a DeviceId>, Option<&'a str>);
 

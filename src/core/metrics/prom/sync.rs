@@ -196,6 +196,16 @@ label_set! {
 	}
 }
 
+label_set! {
+	/// How a wait on the sync journal found out whether the user is in a room.
+	pub enum Lookup("how") {
+		/// One room was looked up on its own.
+		Room => "room",
+		/// The list of every room the user is in was loaded.
+		Set => "set",
+	}
+}
+
 /// Metrics of the sync endpoints.
 pub struct SyncMetrics {
 	v3_build: EnumFamily<SinceKind, Histogram<15>>,
@@ -216,6 +226,8 @@ pub struct SyncMetrics {
 	journal_evictions: Counter,
 	journal_records: EnumFamily<JournalKind, Counter>,
 	journal_misses: EnumFamily<JournalKind, Counter>,
+	wait_scanned: Counter,
+	wait_lookups: EnumFamily<Lookup, Counter>,
 	long_polls: EnumFamily<Api, Gauge>,
 	v5_pass: EnumFamily<Pass, Histogram<15>>,
 	v5_connections_loaded: Gauge,
@@ -256,6 +268,8 @@ impl SyncMetrics {
 			journal_evictions: Counter::new(),
 			journal_records: EnumFamily::new(Counter::new),
 			journal_misses: EnumFamily::new(Counter::new),
+			wait_scanned: Counter::new(),
+			wait_lookups: EnumFamily::new(Counter::new),
 			long_polls: EnumFamily::new(Gauge::new),
 			v5_pass: EnumFamily::new(|| Histogram::seconds(&SECONDS)),
 			v5_connections_loaded: Gauge::new(),
@@ -359,6 +373,15 @@ impl SyncMetrics {
 	/// Counts a room where the fast path found a change that the sync journal
 	/// did not hold.
 	pub fn journal_miss(&self, kind: JournalKind) { self.journal_misses.get(kind).inc(); }
+
+	#[inline]
+	/// Counts `entries` changes of the sync journal that a wait passed over.
+	pub fn wait_scanned(&self, entries: u64) { self.wait_scanned.add(entries); }
+
+	#[inline]
+	/// Counts one way a wait on the sync journal found out whether the user is in
+	/// a room.
+	pub fn wait_lookup(&self, how: Lookup) { self.wait_lookups.get(how).inc(); }
 
 	#[inline]
 	/// Counts a request as waiting for activity until the guard is dropped.
@@ -484,6 +507,14 @@ impl SyncMetrics {
 	pub fn journal_missed(&self, kind: JournalKind) -> u64 { self.journal_misses.get(kind).get() }
 
 	#[must_use]
+	/// Returns the number of journal changes waits have passed over.
+	pub fn wait_scanned_total(&self) -> u64 { self.wait_scanned.get() }
+
+	#[must_use]
+	/// Returns the number of membership lookups waits have made in a way.
+	pub fn wait_lookups_total(&self, how: Lookup) -> u64 { self.wait_lookups.get(how).get() }
+
+	#[must_use]
 	/// Returns the number of requests waiting for activity on an API.
 	pub fn long_polling(&self, api: Api) -> i64 { self.long_polls.get(api).get() }
 
@@ -585,27 +616,7 @@ impl SyncMetrics {
 			 any count above zero means a change the journal and typing do not name.",
 			&self.candidates_misses,
 		);
-		w.metric(
-			"tuwunel_sync_journal_entries",
-			"Changes the sync journal holds in memory, zero when the journal is off.",
-			&self.journal_entries,
-		);
-		w.metric(
-			"tuwunel_sync_journal_evictions_total",
-			"Changes the sync journal dropped to stay within its capacity.",
-			&self.journal_evictions,
-		);
-		w.metric(
-			"tuwunel_sync_journal_recorded_total",
-			"Changes stored in the sync journal, by kind, one per room of a write.",
-			&self.journal_records,
-		);
-		w.metric(
-			"tuwunel_sync_journal_misses_total",
-			"Rooms where the fast path found a change that the sync journal did not hold, by \
-			 verdict; any count above zero means a write the journal does not record.",
-			&self.journal_misses,
-		);
+		self.write_journal(w);
 		w.metric(
 			"tuwunel_sync_long_polls",
 			"Sync requests waiting for activity, by API version.",
@@ -659,6 +670,41 @@ impl SyncMetrics {
 		);
 	}
 
+	fn write_journal(&self, w: &mut Writer) {
+		w.metric(
+			"tuwunel_sync_journal_entries",
+			"Changes the sync journal holds in memory, zero when the journal is off.",
+			&self.journal_entries,
+		);
+		w.metric(
+			"tuwunel_sync_journal_evictions_total",
+			"Changes the sync journal dropped to stay within its capacity.",
+			&self.journal_evictions,
+		);
+		w.metric(
+			"tuwunel_sync_journal_recorded_total",
+			"Changes stored in the sync journal, by kind, one per room of a write.",
+			&self.journal_records,
+		);
+		w.metric(
+			"tuwunel_sync_journal_misses_total",
+			"Rooms where the fast path found a change that the sync journal did not hold, by \
+			 verdict; any count above zero means a write the journal does not record.",
+			&self.journal_misses,
+		);
+		w.metric(
+			"tuwunel_sync_v3_wait_scanned_total",
+			"Changes of the sync journal that waits on it passed over.",
+			&self.wait_scanned,
+		);
+		w.metric(
+			"tuwunel_sync_v3_wait_lookups_total",
+			"Lookups of a user's membership by waits on the sync journal, by how: room for one \
+			 room looked up on its own, set for the list of every room the user is in loaded.",
+			&self.wait_lookups,
+		);
+	}
+
 	pub(super) fn series(&self) -> usize {
 		[
 			self.v3_build.series(),
@@ -679,6 +725,8 @@ impl SyncMetrics {
 			self.journal_evictions.series(),
 			self.journal_records.series(),
 			self.journal_misses.series(),
+			self.wait_scanned.series(),
+			self.wait_lookups.series(),
 			self.long_polls.series(),
 			self.v5_pass.series(),
 			self.v5_connections_loaded.series(),

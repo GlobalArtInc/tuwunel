@@ -113,6 +113,8 @@ shares the `_other` series.
 | `tuwunel_sync_journal_evictions_total` | counter | none |
 | `tuwunel_sync_journal_recorded_total` | counter | `kind` |
 | `tuwunel_sync_journal_misses_total` | counter | `kind` |
+| `tuwunel_sync_v3_wait_scanned_total` | counter | none |
+| `tuwunel_sync_v3_wait_lookups_total` | counter | `how` |
 | `tuwunel_sync_v5_pass_seconds` | histogram | `pass` |
 | `tuwunel_sync_v5_response_rooms` | histogram | none |
 | `tuwunel_sync_v5_unknown_pos_total` | counter | none |
@@ -186,6 +188,16 @@ journal does not record. A room a build's snapshot of the journal lacks is asked
 about again before it counts, since it may have changed after the snapshot. Rooms
 asked about a `since` older than the journal covers are not counted.
 `journal_capacity` is read once at startup, so changing it needs a restart.
+
+A wait on the journal sleeps until the retirement frontier of the global counter
+moves, then looks at the journal entries between the frontiers and decides whether
+one concerns the account.
+`tuwunel_sync_v3_wait_scanned_total` counts the entries the scans for those waits
+pass over, a window scanned again after a lookup counting again, and
+`tuwunel_sync_v3_wait_lookups_total` counts how they found out whether the account is
+in the room of an entry: `how` is `room` for one room looked up on its own, and `set`
+for the list of every room the account is in loaded in one pass, which a wait does
+once it meets more than 32 rooms it does not know.
 
 ### Database
 

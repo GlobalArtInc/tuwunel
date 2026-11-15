@@ -277,7 +277,9 @@ impl Journal {
 	/// A journal that is off records nothing, so a scan of it would find every
 	/// window quiet; the caller does not scan a journal whose capacity is 0.
 	///
-	/// One pass under the shared lock, over the entries of the window only.
+	/// One pass under the shared lock, over the entries of the window only. The
+	/// entries it looked at are counted, except when the verdict came before the
+	/// window was looked at, for a `since` below the horizon or an empty window.
 	#[must_use]
 	pub fn scan(
 		&self,
@@ -300,6 +302,7 @@ impl Journal {
 
 		let mut unknown: Vec<OwnedRoomId> = Vec::new();
 		let mut seen: HashSet<&RoomId> = HashSet::new();
+		let mut walked = 0_u64;
 
 		let window = state
 			.entries
@@ -307,6 +310,8 @@ impl Journal {
 			.flat_map(|(_, changes)| changes);
 
 		for change in window {
+			walked = walked.saturating_add(1);
+
 			if let Some(owner) = change.user.as_deref() {
 				let other_device = change
 					.device
@@ -314,6 +319,8 @@ impl Journal {
 					.is_some_and(|target| Some(target) != device);
 
 				if owner == user && !other_device {
+					self.walked(walked);
+
 					return Scan::Wake(change.kind);
 				}
 
@@ -325,7 +332,11 @@ impl Journal {
 			};
 
 			match memo.get(room) {
-				| Some(true) => return Scan::Wake(change.kind),
+				| Some(true) => {
+					self.walked(walked);
+
+					return Scan::Wake(change.kind);
+				},
 				| Some(false) => {},
 				| None if memo.complete => {},
 				| None =>
@@ -333,16 +344,26 @@ impl Journal {
 						unknown.push(room.to_owned());
 
 						if unknown.len() > limit {
+							self.walked(walked);
+
 							return Scan::Resolve { rooms: unknown, overflow: true };
 						}
 					},
 			}
 		}
 
+		self.walked(walked);
+
 		if unknown.is_empty() {
 			Scan::Quiet
 		} else {
 			Scan::Resolve { rooms: unknown, overflow: false }
+		}
+	}
+
+	fn walked(&self, entries: u64) {
+		if let Some(registry) = self.metrics.prometheus() {
+			registry.sync.wait_scanned(entries);
 		}
 	}
 

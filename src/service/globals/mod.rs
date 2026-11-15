@@ -93,6 +93,21 @@ impl Service {
 	)]
 	pub async fn wait_count(&self, count: &u64) -> Result<u64> { self.db.wait_count(count).await }
 
+	/// Subscribes to the retirement frontier as it moves.
+	///
+	/// The receiver starts with the current value as seen, so `changed` waits for the
+	/// next retirement. A caller that must not miss a retirement between subscribing
+	/// and looking at what the frontier covers reads it with `borrow_and_update`
+	/// first. Every write numbered up to the value read has retired. The value can
+	/// stand below [`Self::current_count`] while a younger permit is held, and
+	/// catches up when that permit retires, so a caller that wants every retired
+	/// number takes the larger of the two, reading `current_count` after the
+	/// receiver: a retirement moves the receiver before `current_count` can show
+	/// it, so a retirement the later read shows and the earlier read did not still
+	/// leaves `changed` ready.
+	#[must_use]
+	pub fn watch_retired(&self) -> tokio::sync::watch::Receiver<u64> { self.db.watch_retired() }
+
 	/// Dispatches the next persistent sequence number.
 	///
 	/// The returned permit dereferences to the allocated number. Dropping it retires the associated

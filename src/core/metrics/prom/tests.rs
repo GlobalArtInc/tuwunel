@@ -5,7 +5,7 @@ use regex::Regex;
 
 use super::{
 	APPSERVICE_CAP, Api, Build, BuildPath, CacheSample, Condition, Counter, DynFamily,
-	EnumFamily, Fastpath, Gauge, Histogram, JournalKind, MAX_KEY_LEN, Metric, OTHER, Op,
+	EnumFamily, Fastpath, Gauge, Histogram, JournalKind, Lookup, MAX_KEY_LEN, Metric, OTHER, Op,
 	PROVIDER_CAP, Pass, Phase, Registry, Reply, RocksSample, Scale, Section, SendResult,
 	SinceKind, WatchPart, Writer,
 };
@@ -37,6 +37,7 @@ const ALLOWED_LABELS: &[&str] = &[
 	"section",
 	"appservice",
 	"kind",
+	"how",
 	"result",
 	"pool",
 	"provider",
@@ -859,6 +860,35 @@ fn sync_journal_is_counted_per_kind_and_its_size_is_a_gauge() {
 		"tuwunel_sync_journal_misses_total{kind=\"private_read\"} 1\n",
 		"tuwunel_sync_journal_misses_total{kind=\"device_lists\"} 1\n",
 		"tuwunel_sync_journal_misses_total{kind=\"timeline\"} 0\n",
+	] {
+		assert!(text.contains(line), "{line}\n{text}");
+	}
+
+	assert!(parsed.samples <= registry.max_series());
+}
+
+#[test]
+fn sync_journal_waits_count_the_changes_they_pass_and_their_lookups_by_way() {
+	let registry = Registry::new();
+	let group = &registry.sync;
+
+	group.wait_scanned(40);
+	group.wait_scanned(2);
+	group.wait_lookup(Lookup::Room);
+	group.wait_lookup(Lookup::Room);
+	group.wait_lookup(Lookup::Set);
+
+	assert_eq!(group.wait_scanned_total(), 42);
+	assert_eq!(group.wait_lookups_total(Lookup::Room), 2);
+	assert_eq!(group.wait_lookups_total(Lookup::Set), 1);
+
+	let text = registry.render();
+	let parsed = parse(&text);
+
+	for line in [
+		"tuwunel_sync_v3_wait_scanned_total 42\n",
+		"tuwunel_sync_v3_wait_lookups_total{how=\"room\"} 2\n",
+		"tuwunel_sync_v3_wait_lookups_total{how=\"set\"} 1\n",
 	] {
 		assert!(text.contains(line), "{line}\n{text}");
 	}
