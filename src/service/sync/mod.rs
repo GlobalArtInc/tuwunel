@@ -6,12 +6,14 @@ mod watch;
 mod tests;
 
 use std::{
-	collections::{BTreeMap, btree_map::Entry},
+	collections::{BTreeMap, HashMap, HashSet, btree_map::Entry},
+	fmt,
 	mem::replace,
 	sync::{
 		Arc,
 		atomic::{AtomicU64, Ordering},
 	},
+	time::Instant,
 };
 
 use futures::Stream;
@@ -21,6 +23,7 @@ use ruma::{
 		ConnId as ConnectionId, ListId, Request, request,
 		request::{AccountData, E2EE, Profiles, Receipts, ToDevice, Typing},
 	},
+	events::room::member::MembershipState,
 	profile::ProfileFieldName,
 };
 use serde::{Deserialize, Serialize};
@@ -111,6 +114,67 @@ pub struct Connection {
 	/// answered without a pass.
 	#[serde(skip)]
 	pub ranges_owed: bool,
+
+	/// The rooms the last pass selected, kept in memory only.
+	///
+	/// A pass revises it with the rooms the change journal names instead of
+	/// reading the membership of every room again. Empty after a restart, when
+	/// the client resets the connection, and whenever a pass could not vouch for
+	/// it, so such a connection selects its rooms from scratch.
+	#[serde(skip)]
+	pub index: Option<Box<RoomIndex>>,
+}
+
+/// The rooms of an account a sliding sync pass selected, as of one position.
+///
+/// It holds what the pass chose from, every room the user is in or invited to
+/// or knocking on, and what it chose, the rooms of the lists with the counts
+/// they were ordered by. Nothing else of the connection is needed to revise it
+/// from the change journal.
+pub struct RoomIndex {
+	/// The `next_batch` of the pass the index is exact at.
+	pub at: u64,
+
+	/// When the index was built from every room, which bounds how long a
+	/// mistake in it lives.
+	pub built: Instant,
+
+	/// A digest of the lists and their filters the index was selected for.
+	pub digest: u64,
+
+	/// Every room the user is joined to, invited to or knocking on, including
+	/// those no list takes.
+	pub members: HashSet<OwnedRoomId>,
+
+	/// The rooms a pass puts in the window and the lists, with their counts.
+	pub selected: HashMap<OwnedRoomId, IndexedRoom>,
+}
+
+/// What a pass found out about one selected room.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IndexedRoom {
+	/// The membership the room was selected under.
+	pub membership: Option<MembershipState>,
+
+	/// The lists whose filters the room matches.
+	pub lists: SmallVec<[ListId; 1]>,
+
+	/// The position of the room's last change, which orders the rooms.
+	pub event_count: u64,
+
+	/// The position of the room's last change that may carry a payload.
+	pub payload_count: u64,
+}
+
+impl fmt::Debug for RoomIndex {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_struct("RoomIndex")
+			.field("at", &self.at)
+			.field("digest", &self.digest)
+			.field("members", &self.members.len())
+			.field("selected", &self.selected.len())
+			.finish_non_exhaustive()
+	}
 }
 
 /// Delivery progress for one room on a Sliding Sync connection.

@@ -196,6 +196,37 @@ pub struct Sync {
 	#[serde(default)]
 	pub v5_journal_wait_verify: bool,
 
+	/// A sliding sync pass chooses the rooms of its lists from an index kept
+	/// with the connection, which it revises with the rooms the change journal
+	/// names since the pass before, instead of reading the membership of every
+	/// room of the account again. The pass of an account with thousands of rooms
+	/// then costs the changed rooms alone. The index is built by a pass over
+	/// every room, and a pass goes back to that when the index is missing,
+	/// older than ten minutes, or cannot be revised: the lists or their filters
+	/// changed, a list filters by space, the request repeats an earlier
+	/// position, the journal no longer covers the index or names too many rooms,
+	/// or the account data of the user changed. Needs `journal_capacity` above 0.
+	/// Run `v5_candidates_verify` first and check that
+	/// `tuwunel_sync_v5_candidates_mismatch_total` stays at 0.
+	/// `v5_candidates_verify` takes precedence.
+	///
+	/// reloadable: yes
+	#[serde(default)]
+	pub v5_candidates: bool,
+
+	/// The sliding sync pass still chooses its rooms from every room of the
+	/// account and answers from that, and also revises the index with the
+	/// journal and compares the result with the answer. A difference in the
+	/// window or in the count of a list that no write after the pass explains
+	/// is logged as an error and counted in
+	/// `tuwunel_sync_v5_candidates_mismatch_total`, by `part`. The index is
+	/// built again from the full pass every time. Needs `journal_capacity`
+	/// above 0.
+	///
+	/// reloadable: yes
+	#[serde(default)]
+	pub v5_candidates_verify: bool,
+
 	/// Joined-room count from which a legacy sync that has only presence to
 	/// report keeps waiting instead of answering.
 	///
@@ -296,6 +327,8 @@ impl Default for Sync {
 			journal_wait_verify: false,
 			v5_journal_wait: false,
 			v5_journal_wait_verify: false,
+			v5_candidates: false,
+			v5_candidates_verify: false,
 			presence_only_min_rooms: 0,
 			journal_capacity: default_journal_capacity(),
 			initial_large_account_rooms: default_initial_large_account_rooms(),

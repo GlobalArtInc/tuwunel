@@ -266,6 +266,50 @@ of `collect` that costs the most per room; a pass that collects nothing is not c
 `quiet` for the answers of the gate and `pass` for the answers after a pass; a request
 that failed is in neither.
 
+With `v5_candidates` on, a sliding sync pass takes the rooms of its lists from an index
+kept with the connection, in memory only, and revises it with the rooms the change
+journal names since the pass before, instead of reading the membership of every room of
+the account. `tuwunel_sync_v5_select_paths_total` counts the passes by `path`:
+`candidates` for those that revised the index, with `reason` `none`, and `full` for those
+that looked at every room, which is also how the index is built. The `reason` for `full`
+is `off` (no switch is on, or the journal is), `no_index` (a new connection, a restart, or
+a request without `pos`), `replay` (the request repeats a position), `filters` (the lists
+or their filters changed), `spaces` (a list filters by space, whose children the journal
+does not name), `refresh` (the index is older than ten minutes), `horizon` (the journal
+no longer covers the position of the index), `overflow` (the journal names more rooms
+than the larger of 1024 and half the rooms the user is in), `account_data` (the global
+account data of the user changed, which moves the direct rooms and the invite
+permissions) or `error` (a read failed while revising the index). A pass that keeps
+rejecting for `overflow` or `account_data` is one the index does not help.
+`tuwunel_sync_v5_candidates_per_pass` counts, for each pass that revised the index, the
+rooms it looked at again: those the journal names that the user is in, was in, or has
+in the index, or whose membership of the user changed.
+
+With `v5_candidates_verify` on, a pass is answered from every room of the account as
+before, and the index is revised beside it and compared with the answer. The
+comparison covers what a client sees, the rooms of the window with their membership,
+lists, and the counts that order them, and the count of every list, and not the rooms the
+lists took before the window was cut. The index is revised from the state at the position
+the pass reads up to, and the full pass reads the rooms live after it, so a write of the
+account that lands in between shows in the full pass alone. That is not a difference of
+the index. Once the full pass has read, the journal is asked what was written after that
+position: a difference about a room the write named is set aside, and so is a difference
+of a count when the write named a room the account is in or was in the index. If the
+journal cannot say, nothing is judged. `tuwunel_sync_v5_candidates_verify_skipped_total`
+counts these comparisons by `reason`: `explained` for a pass with a difference set aside
+and `journal` for a pass the journal could not judge; neither is a mismatch, and a count
+that grows with every pass shows the shadow is blind rather than clean.
+`tuwunel_sync_v5_candidates_mismatch_total` counts every other difference by `part`:
+`window` for a room the two answers do not agree on, `count` for a list counted otherwise.
+Each is logged as an error with the user, the room or list, the position of the index and
+the position of the pass; at most 32 differences of a pass are logged one by one. A
+mismatch is a difference that is not in the journal and that no write after the pass
+explains: a change the journal does not name, or a room the index judges otherwise than
+the full pass does, so any count above zero is to be looked at. In this mode the passes
+that revised the index are counted as `candidates` too, so that the shadow shows how
+often the index would have been used. The index is built again from the full pass every
+time, so a difference does not carry over.
+
 ### Database
 
 | Metric | Type |

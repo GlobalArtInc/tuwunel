@@ -1,5 +1,6 @@
 mod extensions;
 mod filter;
+mod index;
 mod journal;
 mod range;
 mod rooms;
@@ -53,12 +54,12 @@ use self::{
 		acknowledge_to_device, apply_profiles, apply_ranges, check_to_device,
 		handle as handle_extensions, to_device_pending,
 	},
+	index::select,
 	journal::{
 		Arrival, Checked, Ended, Gated, Wait, gate, list_counts, verify_pass, verify_timeout,
 		wait_for_change,
 	},
 	range::collect as collect_ranges,
-	selector::selector,
 };
 use super::{joined_since, long_poll, share_encrypted_room};
 use crate::{ClientIp, Ruma, utils::poll_deadline};
@@ -314,7 +315,7 @@ pub(crate) async fn sync_events_v5_route(
 		};
 
 		let select_phase = registry.map(|registry| registry.sync.v5_phase(V5Phase::Select));
-		(window, response.lists) = selector(&mut conn, sync_info).await;
+		(window, response.lists) = select(&mut conn, sync_info, !advancing).await;
 		drop(select_phase);
 		conn.last_counts = Some(list_counts(&response.lists));
 

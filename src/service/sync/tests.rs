@@ -1,6 +1,7 @@
 use std::{
-	collections::BTreeMap,
+	collections::{BTreeMap, HashMap, HashSet},
 	iter::{Once, once},
+	time::Instant,
 };
 
 use minicbor_serde::{from_slice, to_vec};
@@ -20,8 +21,9 @@ use serde::{Deserialize, Serialize};
 use tuwunel_core::{Err, Result, config::Figment};
 
 use super::{
-	Connection, ConnectionId, ConnectionKey, Lists, RequiredState, Room, RoomUpdate,
-	Subscriptions, UnreadState, confirmed_removed, connection_matches, into_connection_key,
+	Connection, ConnectionId, ConnectionKey, IndexedRoom, Lists, RequiredState, Room, RoomIndex,
+	RoomUpdate, Subscriptions, UnreadState, confirmed_removed, connection_matches,
+	into_connection_key,
 };
 use crate::test_utils::{create_devices, fixture};
 
@@ -977,6 +979,41 @@ fn connection_cbor_leaves_out_what_a_quiet_answer_repeats() {
 	assert!(decoded.last_counts.is_none());
 	assert!(!decoded.ranges_owed);
 	assert_eq!(bytes, to_vec(&bare).expect("connection must encode"));
+}
+
+#[test]
+fn connection_cbor_leaves_out_the_room_index() {
+	let room_id = room_id!("!indexed:example.com").to_owned();
+	let index = RoomIndex {
+		at: 9,
+		built: Instant::now(),
+		digest: 3,
+		members: HashSet::from([room_id.clone()]),
+		selected: HashMap::from([(room_id, IndexedRoom {
+			membership: None,
+			lists: once(list_id()).collect(),
+			event_count: 4,
+			payload_count: 5,
+		})]),
+	};
+
+	let kept = Connection {
+		next_batch: 9,
+		index: Some(Box::new(index)),
+		..Default::default()
+	};
+
+	let bytes = to_vec(&kept).expect("connection must encode");
+	let decoded: Connection = from_slice(&bytes).expect("connection must decode");
+	let bare = Connection { next_batch: 9, ..Default::default() };
+
+	assert_eq!(decoded.next_batch, 9);
+	assert!(decoded.index.is_none());
+	assert_eq!(bytes, to_vec(&bare).expect("connection must encode"));
+	assert_eq!(
+		format!("{:?}", kept.index.expect("index must be kept")),
+		"RoomIndex { at: 9, digest: 3, members: 1, selected: 1, .. }"
+	);
 }
 
 #[test]

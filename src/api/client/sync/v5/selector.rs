@@ -1,4 +1,7 @@
-use std::{cmp::Ordering, collections::BTreeMap};
+use std::{
+	cmp::Ordering,
+	collections::{BTreeMap, HashSet},
+};
 
 use futures::{
 	FutureExt, StreamExt,
@@ -26,23 +29,33 @@ use super::{
 	filter::{filter_room, filter_room_meta, is_forgotten},
 };
 
+/// Picks the rooms the user is in or was in, with what each is worth to a list,
+/// by looking at every room of the account.
+///
+/// Returns the rooms unsorted, and the rooms the user is joined to, invited to
+/// or knocking on when `track_members` is set, before the invites the filter
+/// refuses are dropped.
 #[tracing::instrument(level = "debug", skip_all)]
-pub(super) async fn selector(
-	conn: &mut Connection,
+pub(super) async fn full_path(
+	conn: &Connection,
 	sync_info: SyncInfo<'_>,
-) -> (Window, ResponseLists) {
+	invite_filter: &InviteFilter,
+	track_members: bool,
+) -> (Vec<WindowRoom>, HashSet<OwnedRoomId>) {
 	use MembershipState::*;
 
 	let SyncInfo { services, sender_user, .. } = sync_info;
 
-	// MSC4155: a stored invite whose sender the recipient ignores or blocks is
-	// kept out of the window, and relaxing the configuration re-exposes it.
-	let invite_filter = services.users.invite_filter(sender_user).await;
-
+	let mut members = HashSet::new();
 	let memberships = services
 		.state_cache
 		.user_memberships(sender_user, Some(&[Join, Invite, Knock]))
-		.map(|(membership, room_id)| (room_id.to_owned(), membership));
+		.map(|(membership, room_id)| (room_id.to_owned(), membership))
+		.inspect(|(room_id, _)| {
+			if track_members {
+				members.insert(room_id.clone());
+			}
+		});
 
 	// A recipient filtering nothing is the common case, and judging an invite
 	// costs a stripped-state load, so only the filtering path buffers futures.
@@ -53,7 +66,7 @@ pub(super) async fn selector(
 		| false => memberships
 			.broad_filter_map(async |(room_id, membership)| {
 				let permitted = !matches!(membership, Invite)
-					|| invite_permitted_room(services, sender_user, &room_id, &invite_filter)
+					|| invite_permitted_room(services, sender_user, &room_id, invite_filter)
 						.await;
 
 				permitted.then_some((room_id, Some(membership)))
@@ -75,24 +88,47 @@ pub(super) async fn selector(
 				.then_some((room_id.clone(), Some(Leave)))
 		});
 
-	let mut rooms = actives
+	let rooms = actives
 		.chain(retracted)
 		.broad_filter_map(|(room_id, membership)| matcher(sync_info, conn, room_id, membership))
 		.collect::<Vec<_>>()
 		.await;
 
+	(rooms, members)
+}
+
+/// Orders the rooms a pass selected, and builds the lists and the window from
+/// them.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(super) async fn finish(
+	conn: &mut Connection,
+	sync_info: SyncInfo<'_>,
+	rooms: &mut [WindowRoom],
+	invite_filter: &InviteFilter,
+) -> (Window, ResponseLists) {
 	rooms.sort_unstable_by(room_sort);
-	for room in &rooms {
+	for room in rooms.iter() {
 		conn.rooms
 			.entry(room.room_id.clone())
 			.or_default();
 	}
 
+	view(conn, sync_info, rooms, invite_filter).await
+}
+
+/// The lists and the window of rooms that are already ordered, which change
+/// nothing of the connection.
+pub(super) async fn view(
+	conn: &Connection,
+	sync_info: SyncInfo<'_>,
+	rooms: &[WindowRoom],
+	invite_filter: &InviteFilter,
+) -> (Window, ResponseLists) {
 	trace!(?rooms);
 	let lists = response_lists(conn.lists.keys(), rooms.iter());
 
 	trace!(?lists);
-	let window = window(sync_info, conn, rooms.iter(), &invite_filter).await;
+	let window = window(sync_info, conn, rooms.iter(), invite_filter).await;
 
 	trace!(?window);
 	(window, lists)
@@ -104,7 +140,7 @@ pub(super) async fn selector(
 	skip_all,
 	fields(?room_id, ?membership)
 )]
-async fn matcher(
+pub(super) async fn matcher(
 	sync_info: SyncInfo<'_>,
 	conn: &Connection,
 	room_id: OwnedRoomId,
@@ -324,7 +360,7 @@ fn bounded_count(next_batch: u64, count: Option<u64>) -> u64 {
 		.unwrap_or_default()
 }
 
-fn room_sort(a: &WindowRoom, b: &WindowRoom) -> Ordering {
+pub(super) fn room_sort(a: &WindowRoom, b: &WindowRoom) -> Ordering {
 	b.event_count
 		.cmp(&a.event_count)
 		.then_with(|| a.room_id.cmp(&b.room_id))

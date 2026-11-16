@@ -125,6 +125,56 @@ label_set! {
 }
 
 label_set! {
+	/// Where a sliding sync pass took the rooms of its lists from.
+	pub enum SelectPath("path") {
+		/// From the index of the connection, revised with the rooms the change
+		/// journal names.
+		Candidates => "candidates",
+		/// From every room of the account.
+		Full => "full",
+	}
+}
+
+label_set! {
+	/// Why a sliding sync pass took its rooms from every room of the account.
+	pub enum SelectReason("reason") {
+		/// The pass took the rooms from the index.
+		None => "none",
+		/// The switches are off or the journal is.
+		Off => "off",
+		/// The connection had no index yet.
+		NoIndex => "no_index",
+		/// The request repeated an earlier position.
+		Replay => "replay",
+		/// The lists or their filters changed since the index was built.
+		Filters => "filters",
+		/// A list filters by space, whose children no change names.
+		Spaces => "spaces",
+		/// The index was older than ten minutes.
+		Refresh => "refresh",
+		/// The journal no longer covers the position of the index.
+		Horizon => "horizon",
+		/// The journal names more rooms than the index is revised for.
+		Overflow => "overflow",
+		/// The global account data of the user changed.
+		AccountData => "account_data",
+		/// The index could not be revised because a read failed.
+		Error => "error",
+	}
+}
+
+label_set! {
+	/// Which part of a sliding sync answer differed between the index and the full
+	/// pass.
+	pub enum Mismatch("part") {
+		/// The rooms of the window, or what the window holds of one.
+		Window => "window",
+		/// The count of a list.
+		Count => "count",
+	}
+}
+
+label_set! {
 	/// A part of a v3 sync build, timed by the time spent polling it.
 	pub enum Phase("phase") {
 		/// Joined rooms.
@@ -282,6 +332,19 @@ label_set! {
 	}
 }
 
+label_set! {
+	/// Why the comparison of the index of a sliding sync connection with the full
+	/// pass did not judge every difference it found.
+	pub enum Skipped("reason") {
+		/// The journal could not say what was written after the pass, so no
+		/// difference was judged.
+		Journal => "journal",
+		/// The journal names a write after the pass for a room or a count that
+		/// differs, so the difference was set aside.
+		Explained => "explained",
+	}
+}
+
 /// Metrics of the sync endpoints.
 pub struct SyncMetrics {
 	v3_build: EnumFamily<SinceKind, Histogram<15>>,
@@ -313,6 +376,10 @@ pub struct SyncMetrics {
 	v5_phase: EnumFamily<V5Phase, Histogram<15>>,
 	v5_requests: EnumFamily<V5Path, Counter>,
 	v5_fresh_payloads: Histogram<15>,
+	v5_select_paths: EnumFamily<(SelectPath, SelectReason), Counter>,
+	v5_candidates_per_pass: Histogram<15>,
+	v5_candidates_mismatches: EnumFamily<Mismatch, Counter>,
+	v5_candidates_skipped: EnumFamily<Skipped, Counter>,
 	v5_connections_loaded: Gauge,
 	v5_connections_stored: Seen<Gauge>,
 	v5_state_bytes: Histogram<7>,
@@ -362,6 +429,10 @@ impl SyncMetrics {
 			v5_phase: EnumFamily::new(|| Histogram::seconds(&SECONDS)),
 			v5_requests: EnumFamily::new(Counter::new),
 			v5_fresh_payloads: Histogram::new(&ROOMS),
+			v5_select_paths: EnumFamily::new(Counter::new),
+			v5_candidates_per_pass: Histogram::new(&ROOMS),
+			v5_candidates_mismatches: EnumFamily::new(Counter::new),
+			v5_candidates_skipped: EnumFamily::new(Counter::new),
 			v5_connections_loaded: Gauge::new(),
 			v5_connections_stored: Seen::new(Gauge::new()),
 			v5_state_bytes: Histogram::new(&STATE_BYTES),
@@ -520,6 +591,32 @@ impl SyncMetrics {
 	#[inline]
 	/// Records how many rooms one sliding sync pass built a payload for anew.
 	pub fn v5_fresh_payloads(&self, rooms: u64) { self.v5_fresh_payloads.observe(rooms); }
+
+	#[inline]
+	/// Counts a sliding sync pass by where it took its rooms from and, for the full
+	/// walk, why.
+	pub fn v5_selected(&self, path: SelectPath, reason: SelectReason) {
+		self.v5_select_paths.get((path, reason)).inc();
+	}
+
+	#[inline]
+	/// Records how many rooms the journal had one sliding sync pass revise in the
+	/// index of its connection.
+	pub fn v5_candidates(&self, rooms: u64) { self.v5_candidates_per_pass.observe(rooms); }
+
+	#[inline]
+	/// Counts a difference between the index of a sliding sync connection and the
+	/// full pass.
+	pub fn v5_candidates_mismatch(&self, part: Mismatch) {
+		self.v5_candidates_mismatches.get(part).inc();
+	}
+
+	#[inline]
+	/// Counts a comparison of the index of a sliding sync connection with the full
+	/// pass that did not judge every difference it found.
+	pub fn v5_candidates_skip(&self, reason: Skipped) {
+		self.v5_candidates_skipped.get(reason).inc();
+	}
 
 	#[inline]
 	/// Counts a sliding sync request answered with an unknown position.
@@ -682,6 +779,29 @@ impl SyncMetrics {
 	#[must_use]
 	/// Returns the number of sliding sync passes whose rebuilt rooms were counted.
 	pub fn v5_fresh_payload_passes(&self) -> u64 { self.v5_fresh_payloads.count() }
+
+	#[must_use]
+	/// Returns the number of sliding sync passes counted for a path and a reason.
+	pub fn v5_selected_total(&self, path: SelectPath, reason: SelectReason) -> u64 {
+		self.v5_select_paths.get((path, reason)).get()
+	}
+
+	#[must_use]
+	/// Returns the number of sliding sync passes whose revised rooms were counted.
+	pub fn v5_candidate_passes(&self) -> u64 { self.v5_candidates_per_pass.count() }
+
+	#[must_use]
+	/// Returns the number of index mismatches counted for a part.
+	pub fn v5_candidates_mismatched_total(&self, part: Mismatch) -> u64 {
+		self.v5_candidates_mismatches.get(part).get()
+	}
+
+	#[must_use]
+	/// Returns the number of index comparisons that skipped differences for a
+	/// reason.
+	pub fn v5_candidates_skipped_total(&self, reason: Skipped) -> u64 {
+		self.v5_candidates_skipped.get(reason).get()
+	}
 
 	#[must_use]
 	/// Returns the number of unknown position answers counted.
@@ -852,6 +972,38 @@ impl SyncMetrics {
 		);
 	}
 
+	fn write_candidates(&self, w: &mut Writer) {
+		w.metric(
+			"tuwunel_sync_v5_select_paths_total",
+			"Sliding sync passes by where they took their rooms from: candidates for the index \
+			 of the connection revised with the journal, full for every room of the account, \
+			 with the reason for the full walk.",
+			&self.v5_select_paths,
+		);
+		w.metric(
+			"tuwunel_sync_v5_candidates_per_pass",
+			"Rooms the journal had one sliding sync pass revise in the index of its connection, \
+			 after leaving out the rooms the account has nothing to do with.",
+			&self.v5_candidates_per_pass,
+		);
+		w.metric(
+			"tuwunel_sync_v5_candidates_mismatch_total",
+			"Differences between the index of a sliding sync connection and the full pass, by \
+			 part, that no write after the pass explains; any count above zero means a change \
+			 the journal does not name, or a room the index judges otherwise than the full pass \
+			 does.",
+			&self.v5_candidates_mismatches,
+		);
+		w.metric(
+			"tuwunel_sync_v5_candidates_verify_skipped_total",
+			"Comparisons of the index of a sliding sync connection with the full pass that did \
+			 not judge every difference, by reason: journal when it could not say what was \
+			 written after the pass, explained when a write after the pass accounts for a \
+			 difference and it was set aside; neither is a mismatch.",
+			&self.v5_candidates_skipped,
+		);
+	}
+
 	fn write_journal(&self, w: &mut Writer) {
 		w.metric(
 			"tuwunel_sync_journal_entries",
@@ -909,6 +1061,7 @@ impl SyncMetrics {
 			"Why a sliding sync long poll that waits through the sync journal ended, by reason.",
 			&self.v5_wait_wakes,
 		);
+		self.write_candidates(w);
 	}
 
 	pub(super) fn series(&self) -> usize {
@@ -942,6 +1095,10 @@ impl SyncMetrics {
 			self.v5_phase.series(),
 			self.v5_requests.series(),
 			self.v5_fresh_payloads.series(),
+			self.v5_select_paths.series(),
+			self.v5_candidates_per_pass.series(),
+			self.v5_candidates_mismatches.series(),
+			self.v5_candidates_skipped.series(),
 			self.v5_connections_loaded.series(),
 			self.v5_connections_stored.series(),
 			self.v5_state_bytes.series(),

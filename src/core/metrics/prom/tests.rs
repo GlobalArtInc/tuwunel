@@ -5,9 +5,10 @@ use regex::Regex;
 
 use super::{
 	APPSERVICE_CAP, Api, Build, BuildPath, CacheSample, Condition, Counter, DynFamily,
-	EnumFamily, Fastpath, Gauge, Histogram, JournalKind, Lookup, MAX_KEY_LEN, Metric, OTHER, Op,
-	PROVIDER_CAP, Pass, Phase, Registry, Reply, RocksSample, Scale, Section, SendResult,
-	SinceKind, V5Path, V5Phase, Verdict, WaitStage, WakeReason, WatchPart, Writer,
+	EnumFamily, Fastpath, Gauge, Histogram, JournalKind, Lookup, MAX_KEY_LEN, Metric, Mismatch,
+	OTHER, Op, PROVIDER_CAP, Pass, Phase, Registry, Reply, RocksSample, Scale, Section,
+	SelectPath, SelectReason, SendResult, SinceKind, Skipped, V5Path, V5Phase, Verdict,
+	WaitStage, WakeReason, WatchPart, Writer,
 };
 use crate::label_set;
 
@@ -1094,6 +1095,50 @@ fn sync_v3_build_paths_and_candidates_are_counted() {
 		"tuwunel_sync_v3_candidates_per_sync_bucket{le=\"5\"} 2\n",
 		"tuwunel_sync_v3_candidates_per_sync_count 2\n",
 		"tuwunel_sync_candidates_misses_total 1\n",
+	] {
+		assert!(text.contains(line), "{line}\n{text}");
+	}
+
+	assert!(parsed.samples <= registry.max_series());
+}
+
+#[test]
+fn sync_v5_selection_is_counted_by_path_and_reason() {
+	let registry = Registry::new();
+	let group = &registry.sync;
+
+	group.v5_selected(SelectPath::Candidates, SelectReason::None);
+	group.v5_selected(SelectPath::Candidates, SelectReason::None);
+	group.v5_selected(SelectPath::Full, SelectReason::AccountData);
+	group.v5_candidates(0);
+	group.v5_candidates(3);
+	group.v5_candidates_mismatch(Mismatch::Count);
+	group.v5_candidates_skip(Skipped::Explained);
+	group.v5_candidates_skip(Skipped::Explained);
+
+	assert_eq!(group.v5_candidates_skipped_total(Skipped::Explained), 2);
+	assert_eq!(group.v5_candidates_skipped_total(Skipped::Journal), 0);
+	assert_eq!(group.v5_selected_total(SelectPath::Candidates, SelectReason::None), 2);
+	assert_eq!(group.v5_selected_total(SelectPath::Full, SelectReason::AccountData), 1);
+	assert_eq!(group.v5_selected_total(SelectPath::Full, SelectReason::Horizon), 0);
+	assert_eq!(group.v5_candidate_passes(), 2);
+	assert_eq!(group.v5_candidates_mismatched_total(Mismatch::Count), 1);
+	assert_eq!(group.v5_candidates_mismatched_total(Mismatch::Window), 0);
+
+	let text = registry.render();
+	let parsed = parse(&text);
+
+	for line in [
+		"tuwunel_sync_v5_select_paths_total{path=\"candidates\",reason=\"none\"} 2\n",
+		"tuwunel_sync_v5_select_paths_total{path=\"full\",reason=\"account_data\"} 1\n",
+		"tuwunel_sync_v5_select_paths_total{path=\"full\",reason=\"no_index\"} 0\n",
+		"tuwunel_sync_v5_candidates_per_pass_bucket{le=\"0\"} 1\n",
+		"tuwunel_sync_v5_candidates_per_pass_bucket{le=\"5\"} 2\n",
+		"tuwunel_sync_v5_candidates_per_pass_count 2\n",
+		"tuwunel_sync_v5_candidates_mismatch_total{part=\"count\"} 1\n",
+		"tuwunel_sync_v5_candidates_mismatch_total{part=\"window\"} 0\n",
+		"tuwunel_sync_v5_candidates_verify_skipped_total{reason=\"explained\"} 2\n",
+		"tuwunel_sync_v5_candidates_verify_skipped_total{reason=\"journal\"} 0\n",
 	] {
 		assert!(text.contains(line), "{line}\n{text}");
 	}
