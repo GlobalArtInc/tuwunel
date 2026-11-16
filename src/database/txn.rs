@@ -18,7 +18,6 @@ use tuwunel_core::{Error, Result, error, implement};
 use crate::{
 	Engine, Map,
 	keyval::{Key, Slice, serialize_key, serialize_val},
-	util::or_else,
 };
 
 /// Atomic write batch spanning one or more column families from one database.
@@ -424,9 +423,7 @@ pub fn try_write(self) -> Result {
 #[tracing::instrument(level = "trace", skip_all)]
 fn write(&self) -> Result {
 	self.engine
-		.db
-		.write_opt(&self.batch, &self.engine.write_options)
-		.or_else(or_else)
+		.write_batch(&self.batch, &self.engine.write_options)
 }
 
 #[implement(Txn)]

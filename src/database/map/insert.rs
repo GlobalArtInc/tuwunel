@@ -5,8 +5,6 @@
 
 use tuwunel_core::implement;
 
-use crate::util::or_else;
-
 /// Stores a raw key and raw value in this map.
 ///
 /// The write uses the map's configured options, flushes immediately when the
@@ -25,9 +23,7 @@ where
 {
 	let write_options = &self.write_options;
 	self.engine
-		.db
-		.put_cf_opt(&self.cf(), key, val, write_options)
-		.or_else(or_else)
+		.write_put(&self.cf(), key, val, write_options)
 		.expect("database insert error");
 
 	if !self.engine.corked() {

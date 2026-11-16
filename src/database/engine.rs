@@ -43,6 +43,7 @@ pub use self::metrics::MetricsSnapshot;
 use crate::{
 	Context, Map,
 	pool::Pool,
+	replica::Replica,
 	util::{map_err, result},
 };
 
@@ -81,6 +82,9 @@ pub struct Engine {
 
 	/// Live cork count; nonzero suppresses the per-write WAL flush.
 	corks: AtomicU32,
+
+	/// Cluster replication state; inert while the role is standalone.
+	pub(crate) replica: Replica,
 }
 
 /// Backing RocksDB type: multi-threaded column-family access, no transactions.

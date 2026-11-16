@@ -2,8 +2,6 @@ use std::fmt::Debug;
 
 use tuwunel_core::implement;
 
-use crate::util::or_else;
-
 /// Deletes a raw key from this map.
 ///
 /// The removal uses the map's configured options, flushes immediately when the
@@ -21,9 +19,7 @@ where
 {
 	let write_options = &self.write_options;
 	self.engine
-		.db
-		.delete_cf_opt(&self.cf(), key, write_options)
-		.or_else(or_else)
+		.write_delete(&self.cf(), key, write_options)
 		.expect("database remove error");
 
 	if !self.engine.corked() {

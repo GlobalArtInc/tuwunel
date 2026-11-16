@@ -21,6 +21,7 @@ pub mod keyval;
 mod map;
 pub mod maps;
 mod pool;
+mod replica;
 mod ser;
 mod stream;
 #[cfg(test)]
@@ -42,6 +43,7 @@ pub use self::{
 	keyval::{KeyBuf, KeyVal, Slice, deserialize_key, serialize_key, serialize_val},
 	map::{Get, Map, MapId, Qry, compact},
 	pool::PoolStats,
+	replica::{Barrier, BarrierError, Entry, Role},
 	ser::{Cbor, Interfix, Json, SEP, Separator, serialize, serialize_to, serialize_to_vec},
 	txn::{Txn, TxnError},
 };

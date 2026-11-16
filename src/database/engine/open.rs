@@ -84,6 +84,7 @@ pub(crate) async fn open(ctx: Arc<Context>, desc: &[Descriptor]) -> Result<Arc<S
 		write_options: WriteOptions::default(),
 		cf_index: OnceLock::new(),
 		corks: AtomicU32::new(0),
+		replica: Default::default(),
 	}))
 }
 
