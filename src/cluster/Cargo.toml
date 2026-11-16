@@ -22,18 +22,22 @@ default = [
 ]
 
 [dependencies]
+aws-lc-rs.workspace = true
+axum.workspace = true
 futures.workspace = true
 openraft.workspace = true
 postcard.workspace = true
 rand.workspace = true
+reqwest.workspace = true
 rust-rocksdb.workspace = true
 serde.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 tuwunel-core.workspace = true
 tuwunel-database.workspace = true
 
 [dev-dependencies]
-tracing.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

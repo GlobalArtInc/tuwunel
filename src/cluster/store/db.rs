@@ -13,6 +13,7 @@ use rocksdb::{
 };
 use serde::{Serialize, de::DeserializeOwned};
 
+use super::delay::SyncDelay;
 #[cfg(test)]
 use super::probe::Probe;
 use crate::types::TypeConfig;
@@ -24,6 +25,7 @@ const META: &str = "meta";
 
 const FORMAT: &[u8] = b"format";
 const INCARNATION: &[u8] = b"incarnation";
+const NODE: &[u8] = b"node_id";
 const VOTE: &[u8] = b"vote";
 const COMMITTED: &[u8] = b"committed";
 const PURGED: &[u8] = b"purged";
@@ -44,6 +46,7 @@ const CHUNK: usize = 16_384;
 pub(super) struct Db {
 	inner: Inner,
 	incarnation: u128,
+	delay: SyncDelay,
 	#[cfg(test)]
 	probe: Arc<Probe>,
 }
@@ -70,6 +73,7 @@ impl Db {
 		let db = Self {
 			inner,
 			incarnation,
+			delay: SyncDelay::default(),
 			#[cfg(test)]
 			probe: Arc::default(),
 		};
@@ -80,6 +84,41 @@ impl Db {
 	}
 
 	pub(super) fn incarnation(&self) -> u128 { self.incarnation }
+
+	pub(super) fn delay(&self) -> SyncDelay { self.delay.clone() }
+
+	/// Records the node identifier this store belongs to, or checks it against
+	/// the one recorded.
+	///
+	/// The first call stores the identifier beside the incarnation. A store that
+	/// already belongs to another node is refused: its volume was mounted for
+	/// the wrong node, and the incarnation it holds is not the one that node
+	/// would claim.
+	pub(super) fn bind_node(&self, node: u64) -> io::Result<()> {
+		let Some(stored) = self.node()? else {
+			return self.put_meta(NODE, &node.to_be_bytes());
+		};
+
+		if stored != node {
+			return Err(corrupt(format!(
+				"log store belongs to node {stored} and cannot serve node {node}"
+			)));
+		}
+
+		Ok(())
+	}
+
+	pub(super) fn node(&self) -> io::Result<Option<u64>> {
+		self.get_meta(NODE)?
+			.map(|bytes| {
+				let bytes: [u8; 8] = bytes.as_slice().try_into().map_err(|_| {
+					corrupt(format!("node id has {} bytes, expected 8", bytes.len()))
+				})?;
+
+				Ok(u64::from_be_bytes(bytes))
+			})
+			.transpose()
+	}
 
 	#[cfg(test)]
 	pub(super) fn probe(&self) -> Arc<Probe> { Arc::clone(&self.probe) }
@@ -460,6 +499,8 @@ impl Db {
 	fn sync(&self) -> io::Result<()> {
 		#[cfg(test)]
 		self.probe.count();
+
+		self.delay.wait();
 
 		self.inner.flush_wal(true).map_err(rocks)
 	}

@@ -1,4 +1,5 @@
 mod appservice;
+mod cluster;
 mod family;
 mod http;
 mod inventory;
@@ -16,6 +17,7 @@ mod write;
 
 pub use self::{
 	appservice::{APPSERVICE_CAP, Appservice, SendResult},
+	cluster::{Cluster, NODE_CAP, NodeState, Rejection},
 	family::{DynFamily, EnumFamily, LabelSet, MAX_KEY_LEN, OTHER},
 	http::{Api, Http, InFlight, Method, ROUTE_CAP, StatusClass, UNMATCHED},
 	inventory::Inventory,
@@ -71,6 +73,9 @@ pub struct Registry {
 
 	/// The sync endpoints.
 	pub sync: SyncMetrics,
+
+	/// Cluster replication. Not exposed unless the cluster enables it.
+	pub cluster: Cluster,
 }
 
 impl Registry {
@@ -92,6 +97,7 @@ impl Registry {
 		self.appservice.write(&mut w);
 		self.storage.write(&mut w);
 		self.sync.write(&mut w);
+		self.cluster.write(&mut w);
 
 		w.finish()
 	}
@@ -114,6 +120,7 @@ impl Registry {
 			self.appservice.series(),
 			self.storage.series(),
 			self.sync.series(),
+			self.cluster.series(),
 		]
 		.into_iter()
 		.fold(0, usize::saturating_add)

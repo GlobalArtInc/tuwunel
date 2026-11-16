@@ -295,6 +295,57 @@ providers used for media and backups. `op` is one of `get`, `put`, `delete`,
 object is opened, an upload only for the time spent in calls to the backend
 (not waiting for input), and deletes are counted but not timed.
 
+### Cluster
+
+Present only on a node that runs as part of a cluster (`[global.cluster]`);
+a server that is not part of one exposes none of these.
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `tuwunel_cluster_role` | gauge | |
+| `tuwunel_cluster_term` | gauge | |
+| `tuwunel_cluster_commit_index` | gauge | |
+| `tuwunel_cluster_apply_index` | gauge | |
+| `tuwunel_cluster_follower_lag_entries` | gauge | `node` |
+| `tuwunel_cluster_quorum_ack_age_milliseconds` | gauge | |
+| `tuwunel_cluster_leader_changes_total` | counter | |
+| `tuwunel_cluster_barrier_seconds` | histogram | |
+| `tuwunel_cluster_barrier_timeouts_total` | counter | |
+| `tuwunel_cluster_capture_queue_bytes` | gauge | |
+| `tuwunel_cluster_snapshot_seconds` | histogram | |
+| `tuwunel_cluster_reflected_requests_total` | counter | |
+| `tuwunel_cluster_rpc_rejected_total` | counter | `reason` |
+
+`tuwunel_cluster_role` is 0 for a learner, 1 for a follower, 2 for a candidate,
+3 for the leader and 4 once the Raft core has stopped. The indexes are log
+indexes, and the commit index is the one this node knows of.
+`tuwunel_cluster_follower_lag_entries` and
+`tuwunel_cluster_quorum_ack_age_milliseconds` are the leader's view: how many log
+entries each follower is behind, and how long ago a majority last confirmed the
+leader. The lag series exist only on a node that has been the leader, and read -1
+once it no longer is. The age is -1 on a node that is not the leader and on a
+leader that has no confirmation yet. `node` is the cluster node id; ids beyond
+the series cap share `_other`.
+`tuwunel_cluster_leader_changes_total` counts the times this node has seen a
+leader other than the one before it. The first leader it sees is not a change,
+and neither is a new term of the same leader. The cluster gauges are sampled
+every 250 ms, so a change that comes and goes within one sample is not seen.
+
+The commit barrier records `tuwunel_cluster_barrier_seconds` for each wait that
+ended in a confirmation and `tuwunel_cluster_barrier_timeouts_total` for each
+that gave up. `tuwunel_cluster_reflected_requests_total` counts requests a node
+answered with 503 because it is not the leader.
+`tuwunel_cluster_capture_queue_bytes` is the writes the leader holds back
+while they wait to be replicated, and `tuwunel_cluster_snapshot_seconds` the time
+snapshots take to build or install.
+
+`tuwunel_cluster_rpc_rejected_total{reason}` counts requests the cluster listener
+turned away before Raft saw them: `unauthorized` (wrong or missing token),
+`identity` (a node or an incarnation that is not the one the membership names),
+`malformed`, `too_large` and `invalid` (a log entry or a member record that
+cannot be applied). In normal operation `identity` stays at zero; an increase
+means a node is running under an identity the cluster does not know.
+
 ### Process and runtime
 
 `process_resident_memory_bytes`, `process_cpu_seconds_total`,

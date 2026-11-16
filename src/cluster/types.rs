@@ -12,7 +12,12 @@ pub type NodeId = u64;
 /// What the cluster knows about a member besides its identifier.
 ///
 /// The membership of the Raft group is a map from [`NodeId`] to this record, so
-/// it is replicated and agreed upon like any other part of the group state.
+/// it is replicated and agreed upon like any other part of the group state. It
+/// is stored in every log entry that carries a membership and in the position
+/// marker of the database, and a test pins its encoding: a new field, or any
+/// other change of the encoding, makes the logs and markers already on disk
+/// unreadable, and has to raise the format version of the log store and the
+/// version of the marker.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Node {
 	/// Base URL peers reach the node at.

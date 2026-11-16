@@ -32,6 +32,18 @@ use crate::{Err, Result, err};
 ///   to reach it.
 /// - A node never forms a cluster on its own. An empty `raft_path` yields an
 ///   empty log, and only `initialize` turns it into a one-node cluster.
+///
+/// Security:
+/// - The cluster listener speaks plain HTTP, and the shared secret is its only
+///   credential. Whoever holds the secret can append any entry to the log of
+///   every node, which is the right to write anything into the database of
+///   every node.
+/// - The sender and recipient a request names are not authentication. They
+///   guard against an honest process that went stale, such as a node started on
+///   a replaced volume, and whoever holds the secret can forge them.
+/// - Close the port with a network policy to the nodes and the health probes,
+///   never publish it through an ingress, make the secret at least 32 random
+///   bytes, and keep its file readable by the server only (mode 0400).
 #[expect(rustdoc::broken_intra_doc_links, rustdoc::bare_urls)]
 #[derive(Clone, Debug, Deserialize)]
 #[config_example_generator(
@@ -85,8 +97,9 @@ pub struct Cluster {
 	/// file.
 	///
 	/// Every node must hold the same secret. Surrounding whitespace is ignored.
-	/// With the cluster enabled, startup refuses a file that cannot be read or
-	/// is empty.
+	/// With the cluster enabled, startup refuses a file that cannot be read, is
+	/// empty, is shorter than 16 bytes, or holds anything but printable ASCII
+	/// characters without spaces.
 	///
 	/// example: "/etc/tuwunel/cluster-secret"
 	pub secret_file: Option<PathBuf>,
