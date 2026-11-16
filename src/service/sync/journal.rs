@@ -35,18 +35,31 @@ pub struct Journal {
 
 #[derive(Default)]
 struct State {
-	entries: BTreeMap<u64, Changes>,
+	entries: BTreeMap<u64, Batch>,
 	len: usize,
 	horizon: u64,
 }
 
-type Changes = SmallVec<[Change; 1]>;
+type Batch = SmallVec<[Change; 1]>;
 
 struct Change {
 	kind: JournalKind,
 	room: Option<OwnedRoomId>,
 	user: Option<OwnedUserId>,
 	device: Option<OwnedDeviceId>,
+}
+
+/// What a window of the journal holds that concerns one user, as
+/// [`Journal::changes`] reports it.
+#[derive(Debug, Default, Eq, PartialEq)]
+pub struct Changes {
+	/// The rooms with a change of a room kind, for every user or for this one,
+	/// and the rooms with a change of a profile.
+	pub rooms: HashSet<OwnedRoomId>,
+	/// The rooms where the membership of this user changed.
+	pub own_membership: HashSet<OwnedRoomId>,
+	/// Whether the global account data of this user changed.
+	pub global_account_data: bool,
 }
 
 /// Which rooms one wait has found the user to be in.
@@ -196,6 +209,86 @@ impl Journal {
 			.collect();
 
 		Some(rooms)
+	}
+
+	/// Returns what changed for `user` in the window `(after, upto]`, or `None`
+	/// when the journal cannot say: it is off, `after` lies below its horizon, or
+	/// the rooms of the window, those of [`Changes::rooms`] and
+	/// [`Changes::own_membership`] together, number more than `limit`.
+	///
+	/// A change of a room kind, or of a profile with a room, that names no user
+	/// or names `user` puts its room in [`Changes::rooms`]. A change of the
+	/// membership of `user` puts its room in [`Changes::own_membership`] alone.
+	/// A change of the global account data of `user` sets the flag. Changes of
+	/// other users and changes of devices are passed over.
+	///
+	/// One pass over the entries of the window under the shared lock, with no
+	/// await and no call to another service.
+	#[must_use]
+	pub fn changes(&self, user: &UserId, after: u64, upto: u64, limit: usize) -> Option<Changes> {
+		if self.capacity == 0 {
+			return None;
+		}
+
+		let state = self.read();
+
+		if after < state.horizon {
+			return None;
+		}
+
+		let mut found = Changes::default();
+
+		if after >= upto {
+			return Some(found);
+		}
+
+		let mut distinct = 0_usize;
+
+		let window = state
+			.entries
+			.range((Excluded(after), Included(upto)))
+			.flat_map(|(_, changes)| changes);
+
+		for change in window {
+			let owned = change.user.as_deref() == Some(user);
+
+			let own_membership = match change.kind {
+				| JournalKind::GlobalAccountData => {
+					found.global_account_data |= owned;
+
+					continue;
+				},
+				| JournalKind::Membership if owned => true,
+				| kind if is_candidate_kind(kind) && (owned || change.user.is_none()) => false,
+				| _ => continue,
+			};
+
+			let Some(room) = change.room.as_deref() else {
+				continue;
+			};
+
+			let (target, other) = if own_membership {
+				(&mut found.own_membership, &found.rooms)
+			} else {
+				(&mut found.rooms, &found.own_membership)
+			};
+
+			if target.contains(room) {
+				continue;
+			}
+
+			if !other.contains(room) {
+				distinct = distinct.saturating_add(1);
+
+				if distinct > limit {
+					return None;
+				}
+			}
+
+			target.insert(room.to_owned());
+		}
+
+		Some(found)
 	}
 
 	/// Returns whether `room` changed for `user` after `since`, with no upper
@@ -477,6 +570,10 @@ fn is_room_kind(kind: JournalKind) -> bool {
 		| JournalKind::OneTimeKeys
 		| JournalKind::ToDevice => false,
 	}
+}
+
+fn is_candidate_kind(kind: JournalKind) -> bool {
+	is_room_kind(kind) || matches!(kind, JournalKind::Profile)
 }
 
 fn to_u64(len: usize) -> u64 { u64::try_from(len).unwrap_or(u64::MAX) }

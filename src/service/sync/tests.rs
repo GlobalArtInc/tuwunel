@@ -26,6 +26,7 @@ use super::{
 use crate::test_utils::{create_devices, fixture};
 
 mod journal;
+mod journal_changes;
 mod journal_membership;
 mod journal_user;
 mod typing_lag;
