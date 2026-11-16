@@ -118,6 +118,7 @@ shares the `_other` series.
 | `tuwunel_sync_v3_wait_verify_total` | counter | `verdict` |
 | `tuwunel_sync_v3_wait_wakes_total` | counter | `reason` |
 | `tuwunel_sync_v5_pass_seconds` | histogram | `pass` |
+| `tuwunel_sync_v5_phase_seconds` | histogram | `phase` |
 | `tuwunel_sync_v5_response_rooms` | histogram | none |
 | `tuwunel_sync_v5_unknown_pos_total` | counter | none |
 | `tuwunel_sync_v5_connections_loaded` | gauge | none |

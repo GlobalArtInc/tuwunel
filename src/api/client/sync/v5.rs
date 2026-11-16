@@ -30,7 +30,7 @@ use tuwunel_core::{
 	debug::INFO_SPAN_LEVEL,
 	debug_warn,
 	error::inspect_log,
-	metrics::prom::{Api, Pass},
+	metrics::prom::{Api, Pass, V5Phase},
 	smallvec::SmallVec,
 	trace,
 	utils::{
@@ -113,6 +113,7 @@ type ListIds = SmallVec<[ListId; 1]>;
 		since = ?body.body.pos.clone().unwrap_or_default(),
 	)
 )]
+#[expect(clippy::too_many_lines)]
 pub(crate) async fn sync_events_v5_route(
 	Extension(interrupted): Extension<Arc<Notify>>,
 	ClientIp(client): ClientIp,
@@ -240,10 +241,12 @@ pub(crate) async fn sync_events_v5_route(
 		});
 
 		let window;
+		let watch_phase = registry.map(|registry| registry.sync.v5_phase(V5Phase::Watch));
 		let watchers = services
 			.sync
 			.watch(sender_user, sender_device, services.state_cache.rooms_joined(sender_user))
 			.await;
+		drop(watch_phase);
 
 		conn.next_batch = services.globals.wait_pending().await?;
 		let direct_rooms = services
@@ -259,9 +262,12 @@ pub(crate) async fn sync_events_v5_route(
 			direct_rooms: &direct_rooms,
 		};
 
+		let select_phase = registry.map(|registry| registry.sync.v5_phase(V5Phase::Select));
 		(window, response.lists) = selector(&mut conn, sync_info).await;
+		drop(select_phase);
 
 		if conn.globalsince < conn.next_batch {
+			let ranges_phase = registry.map(|registry| registry.sync.v5_phase(V5Phase::Ranges));
 			let ranges = collect_ranges(sync_info, &conn, &window);
 			let extensions = handle_extensions(sync_info, &conn, &window);
 			let (mut ranges, extensions) = join(ranges, extensions).await;
@@ -278,6 +284,7 @@ pub(crate) async fn sync_events_v5_route(
 			response.extensions = extensions.into_response(&response.rooms);
 
 			if !is_empty_response(&mut response, keys_answer) {
+				drop(ranges_phase);
 				drop(pass);
 
 				return respond(services, (&conn_key, &conn_val), &conn, response).await;
@@ -417,10 +424,18 @@ async fn respond(
 			.v5_response_rooms(u64::try_from(response.rooms.len()).unwrap_or(u64::MAX));
 	}
 
+	let store_phase = services
+		.server
+		.metrics
+		.prometheus()
+		.map(|registry| registry.sync.v5_phase(V5Phase::Store));
+
 	services
 		.sync
 		.store_connection(key, loaded, conn)
 		.await?;
+
+	drop(store_phase);
 
 	Ok(response)
 }

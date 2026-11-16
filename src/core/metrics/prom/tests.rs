@@ -7,7 +7,7 @@ use super::{
 	APPSERVICE_CAP, Api, Build, BuildPath, CacheSample, Condition, Counter, DynFamily,
 	EnumFamily, Fastpath, Gauge, Histogram, JournalKind, Lookup, MAX_KEY_LEN, Metric, OTHER, Op,
 	PROVIDER_CAP, Pass, Phase, Registry, Reply, RocksSample, Scale, Section, SendResult,
-	SinceKind, Verdict, WakeReason, WatchPart, Writer,
+	SinceKind, V5Phase, Verdict, WakeReason, WatchPart, Writer,
 };
 use crate::label_set;
 
@@ -666,6 +666,34 @@ fn sync_v5_is_counted_per_pass_and_stored_readings_wait_for_a_value() {
 		"tuwunel_sync_v5_connections_loaded 7\n",
 		"tuwunel_sync_v5_connections_stored 9\n",
 		"tuwunel_sync_v5_store_bytes 4096\n",
+	] {
+		assert!(text.contains(line), "{line}\n{text}");
+	}
+
+	assert!(parsed.samples <= registry.max_series());
+}
+
+#[test]
+fn sync_v5_phases_are_timed_per_phase() {
+	let registry = Registry::new();
+	let group = &registry.sync;
+
+	drop(group.v5_phase(V5Phase::Watch));
+	drop(group.v5_phase(V5Phase::Select));
+	drop(group.v5_phase(V5Phase::Ranges));
+	drop(group.v5_phase(V5Phase::Store));
+	drop(group.v5_phase(V5Phase::Store));
+
+	assert_eq!(group.v5_phases(V5Phase::Watch), 1);
+	assert_eq!(group.v5_phases(V5Phase::Store), 2);
+	assert_eq!(group.v5_phases(V5Phase::Ranges), 1);
+
+	let text = registry.render();
+	let parsed = parse(&text);
+
+	for line in [
+		"tuwunel_sync_v5_phase_seconds_count{phase=\"watch\"} 1\n",
+		"tuwunel_sync_v5_phase_seconds_count{phase=\"store\"} 2\n",
 	] {
 		assert!(text.contains(line), "{line}\n{text}");
 	}

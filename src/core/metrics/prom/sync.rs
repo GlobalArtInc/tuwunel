@@ -93,6 +93,21 @@ label_set! {
 }
 
 label_set! {
+	/// A part of a sliding sync pass, timed from its start to its end, not
+	/// counting the wait for activity.
+	pub enum V5Phase("phase") {
+		/// Registering the watchers before the wait.
+		Watch => "watch",
+		/// Choosing the rooms and lists of the pass, with their membership.
+		Select => "select",
+		/// Collecting the ranges, the rooms and the extensions of the response.
+		Ranges => "ranges",
+		/// Storing the connection state the response leaves behind.
+		Store => "store",
+	}
+}
+
+label_set! {
 	/// A part of a v3 sync build, timed by the time spent polling it.
 	pub enum Phase("phase") {
 		/// Joined rooms.
@@ -263,6 +278,7 @@ pub struct SyncMetrics {
 	wait_wakes: EnumFamily<WakeReason, Counter>,
 	long_polls: EnumFamily<Api, Gauge>,
 	v5_pass: EnumFamily<Pass, Histogram<15>>,
+	v5_phase: EnumFamily<V5Phase, Histogram<15>>,
 	v5_connections_loaded: Gauge,
 	v5_connections_stored: Seen<Gauge>,
 	v5_state_bytes: Histogram<7>,
@@ -307,6 +323,7 @@ impl SyncMetrics {
 			wait_wakes: EnumFamily::new(Counter::new),
 			long_polls: EnumFamily::new(Gauge::new),
 			v5_pass: EnumFamily::new(|| Histogram::seconds(&SECONDS)),
+			v5_phase: EnumFamily::new(|| Histogram::seconds(&SECONDS)),
 			v5_connections_loaded: Gauge::new(),
 			v5_connections_stored: Seen::new(Gauge::new()),
 			v5_state_bytes: Histogram::new(&STATE_BYTES),
@@ -440,6 +457,11 @@ impl SyncMetrics {
 	/// Starts timing one pass of a sliding sync request; the time is recorded
 	/// when the timer is dropped.
 	pub fn v5_pass(&self, pass: Pass) -> Timer<'_, 15> { self.v5_pass.get(pass).start() }
+
+	#[inline]
+	/// Starts timing one phase of a sliding sync pass; the time is recorded
+	/// when the timer is dropped.
+	pub fn v5_phase(&self, phase: V5Phase) -> Timer<'_, 15> { self.v5_phase.get(phase).start() }
 
 	#[inline]
 	/// Counts a sliding sync request answered with an unknown position.
@@ -579,6 +601,10 @@ impl SyncMetrics {
 	pub fn v5_passes(&self, pass: Pass) -> u64 { self.v5_pass.get(pass).count() }
 
 	#[must_use]
+	/// Returns the number of sliding sync phases timed for a phase.
+	pub fn v5_phases(&self, phase: V5Phase) -> u64 { self.v5_phase.get(phase).count() }
+
+	#[must_use]
 	/// Returns the number of unknown position answers counted.
 	pub fn v5_unknown_positions(&self) -> u64 { self.v5_unknown_pos.get() }
 
@@ -683,6 +709,14 @@ impl SyncMetrics {
 			"Time of one pass of a sliding sync request, not counting the wait for activity; \
 			 first is the opening pass, woken a pass after the watchers fired.",
 			&self.v5_pass,
+		);
+		w.metric(
+			"tuwunel_sync_v5_phase_seconds",
+			"Time one part of a sliding sync pass spent running, by phase: watch registers the \
+			 watchers, select picks the rooms and lists, ranges collects the rooms and \
+			 extensions of the response, store saves the connection; not counting the wait for \
+			 activity.",
+			&self.v5_phase,
 		);
 		w.metric(
 			"tuwunel_sync_v5_connections_loaded",
@@ -799,6 +833,7 @@ impl SyncMetrics {
 			self.wait_wakes.series(),
 			self.long_polls.series(),
 			self.v5_pass.series(),
+			self.v5_phase.series(),
 			self.v5_connections_loaded.series(),
 			self.v5_connections_stored.series(),
 			self.v5_state_bytes.series(),
