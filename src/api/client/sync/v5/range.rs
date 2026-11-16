@@ -1,4 +1,9 @@
-use std::{collections::BTreeMap, iter::empty, mem::take};
+use std::{
+	collections::BTreeMap,
+	iter::empty,
+	mem::take,
+	sync::atomic::{AtomicUsize, Ordering},
+};
 
 use futures::{FutureExt, StreamExt, TryFutureExt, TryStreamExt, future::try_join4};
 use ruma::{
@@ -73,7 +78,15 @@ struct CompleteRange {
 #[derive(Default)]
 pub(super) struct Results {
 	ranges: BTreeMap<OwnedRoomId, CompleteRange>,
+	failed: usize,
+	fresh: usize,
 }
+
+#[implement(Results)]
+pub(super) fn failed(&self) -> usize { self.failed }
+
+#[implement(Results)]
+pub(super) fn fresh(&self) -> usize { self.fresh }
 
 #[implement(Results)]
 pub(super) fn room_updates(&mut self) -> impl Iterator<Item = RoomUpdate<'_>> {
@@ -130,8 +143,9 @@ pub(super) async fn collect(
 	window: &Window,
 ) -> Results {
 	let ignored = OnceCell::new();
+	let fresh = AtomicUsize::new(0);
 	let empty_room = Room::default();
-	let ranges = window
+	let ranges: BTreeMap<_, _> = window
 		.iter()
 		.stream()
 		.broad_filter_map(async |(room_id, window_room)| {
@@ -139,7 +153,9 @@ pub(super) async fn collect(
 
 			let room_details = merged_room_details(conn, &window_room.lists, room_id);
 
-			match collect_room(sync_info, conn, window_room, room, room_details, &ignored).await {
+			match collect_room(sync_info, conn, window_room, room, room_details, &ignored, &fresh)
+				.await
+			{
 				| Ok(range) => Some((room_id.clone(), range)),
 				| Err(Failure { domain, error }) => {
 					error!(
@@ -157,7 +173,11 @@ pub(super) async fn collect(
 		.collect()
 		.await;
 
-	Results { ranges }
+	Results {
+		failed: window.len().saturating_sub(ranges.len()),
+		fresh: fresh.into_inner(),
+		ranges,
+	}
 }
 
 async fn collect_room(
@@ -167,6 +187,7 @@ async fn collect_room(
 	room: &Room,
 	room_details: RoomDetails,
 	ignored: &OnceCell<Option<IgnoredUserListEvent>>,
+	fresh: &AtomicUsize,
 ) -> Result<CompleteRange, Failure> {
 	let room_id = &window_room.room_id;
 	let (config_hash, required_state) = room_config(&room_details);
@@ -175,6 +196,8 @@ async fn collect_room(
 
 	let delivery = payload_is_fresh
 		.then_async(|| {
+			fresh.fetch_add(1, Ordering::Relaxed);
+
 			handle_room(sync_info, conn, window_room, room, config_changed, room_details)
 		})
 		.map(Option::transpose)
@@ -394,7 +417,7 @@ mod tests {
 		};
 
 		let ranges = [(room_id.to_owned(), range)].into();
-		let mut results = Results { ranges };
+		let mut results = Results { ranges, ..Default::default() };
 
 		assert!(results.take_receipts(room_id).is_some());
 		assert!(results.take_receipts(room_id).is_none());
@@ -415,6 +438,6 @@ mod tests {
 			.into_iter()
 			.collect();
 
-		Results { ranges }
+		Results { ranges, ..Default::default() }
 	}
 }

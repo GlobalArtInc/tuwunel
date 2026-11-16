@@ -7,7 +7,7 @@ use super::{
 	APPSERVICE_CAP, Api, Build, BuildPath, CacheSample, Condition, Counter, DynFamily,
 	EnumFamily, Fastpath, Gauge, Histogram, JournalKind, Lookup, MAX_KEY_LEN, Metric, OTHER, Op,
 	PROVIDER_CAP, Pass, Phase, Registry, Reply, RocksSample, Scale, Section, SendResult,
-	SinceKind, V5Phase, Verdict, WaitStage, WakeReason, WatchPart, Writer,
+	SinceKind, V5Path, V5Phase, Verdict, WaitStage, WakeReason, WatchPart, Writer,
 };
 use crate::label_set;
 
@@ -681,20 +681,65 @@ fn sync_v5_phases_are_timed_per_phase() {
 
 	drop(group.v5_phase(V5Phase::Watch));
 	drop(group.v5_phase(V5Phase::Select));
-	drop(group.v5_phase(V5Phase::Ranges));
+	drop(group.v5_phase(V5Phase::Collect));
+	drop(group.v5_phase(V5Phase::Extensions));
+	drop(group.v5_phase(V5Phase::Extensions));
+	drop(group.v5_phase(V5Phase::Profiles));
 	drop(group.v5_phase(V5Phase::Store));
 	drop(group.v5_phase(V5Phase::Store));
 
 	assert_eq!(group.v5_phases(V5Phase::Watch), 1);
 	assert_eq!(group.v5_phases(V5Phase::Store), 2);
-	assert_eq!(group.v5_phases(V5Phase::Ranges), 1);
+	assert_eq!(group.v5_phases(V5Phase::Collect), 1);
+	assert_eq!(group.v5_phases(V5Phase::Extensions), 2);
+	assert_eq!(group.v5_phases(V5Phase::Profiles), 1);
 
 	let text = registry.render();
 	let parsed = parse(&text);
 
 	for line in [
 		"tuwunel_sync_v5_phase_seconds_count{phase=\"watch\"} 1\n",
+		"tuwunel_sync_v5_phase_seconds_count{phase=\"collect\"} 1\n",
+		"tuwunel_sync_v5_phase_seconds_count{phase=\"extensions\"} 2\n",
+		"tuwunel_sync_v5_phase_seconds_count{phase=\"profiles\"} 1\n",
 		"tuwunel_sync_v5_phase_seconds_count{phase=\"store\"} 2\n",
+	] {
+		assert!(text.contains(line), "{line}\n{text}");
+	}
+
+	assert!(parsed.samples <= registry.max_series());
+}
+
+#[test]
+fn sync_v5_requests_and_fresh_payloads_are_counted() {
+	let registry = Registry::new();
+	let group = &registry.sync;
+
+	group.v5_request(V5Path::Quiet);
+	group.v5_request(V5Path::Pass);
+	group.v5_request(V5Path::Pass);
+	group.v5_fresh_payloads(0);
+	group.v5_fresh_payloads(7);
+
+	assert_eq!(group.v5_requests_total(V5Path::Quiet), 1);
+	assert_eq!(group.v5_requests_total(V5Path::Pass), 2);
+	assert_eq!(group.v5_fresh_payload_passes(), 2);
+
+	group.v5_wait_verified(WaitStage::Gate, Verdict::Quiet);
+
+	assert_eq!(group.v5_wait_verified_total(WaitStage::Gate, Verdict::Quiet), 1);
+	assert_eq!(group.v5_wait_verified_total(WaitStage::Woken, Verdict::Quiet), 0);
+
+	let text = registry.render();
+	let parsed = parse(&text);
+
+	for line in [
+		"tuwunel_sync_v5_requests_total{path=\"quiet\"} 1\n",
+		"tuwunel_sync_v5_requests_total{path=\"pass\"} 2\n",
+		"tuwunel_sync_v5_fresh_payloads_per_pass_bucket{le=\"0\"} 1\n",
+		"tuwunel_sync_v5_fresh_payloads_per_pass_bucket{le=\"10\"} 2\n",
+		"tuwunel_sync_v5_fresh_payloads_per_pass_count 2\n",
+		"tuwunel_sync_v5_wait_verify_total{stage=\"gate\",verdict=\"quiet\"} 1\n",
 	] {
 		assert!(text.contains(line), "{line}\n{text}");
 	}

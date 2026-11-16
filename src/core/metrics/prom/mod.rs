@@ -27,7 +27,7 @@ pub use self::{
 	storage::{Op, PROVIDER_CAP, Storage, StoreResult},
 	sync::{
 		Build, BuildPath, Fastpath, JournalKind, LongPoll, Lookup, Pass, Phase, Reply, Section,
-		SinceKind, SyncMetrics, V5Phase, Verdict, WaitStage, WakeReason, WatchPart,
+		SinceKind, SyncMetrics, V5Path, V5Phase, Verdict, WaitStage, WakeReason, WatchPart,
 	},
 	types::{Counter, Gauge, Histogram, Metric, Seen, Timer},
 	write::{Kind, Le, Scale, Value, Writer, push_label},

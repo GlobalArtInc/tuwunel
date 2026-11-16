@@ -85,9 +85,11 @@ label_set! {
 label_set! {
 	/// Which pass of a sliding sync request ran.
 	pub enum Pass("pass") {
-		/// The first pass of the request.
+		/// The first pass of the request, when nothing woke it before.
 		First => "first",
-		/// A pass that ran again after the watchers woke the request.
+		/// A pass that follows a wake: the watchers firing, the journal naming a
+		/// change, or the wake of the gate that held the request before its first
+		/// pass.
 		Woken => "woken",
 	}
 }
@@ -100,10 +102,25 @@ label_set! {
 		Watch => "watch",
 		/// Choosing the rooms and lists of the pass, with their membership.
 		Select => "select",
-		/// Collecting the ranges, the rooms and the extensions of the response.
-		Ranges => "ranges",
+		/// Collecting the ranges of the window rooms: the room payloads, receipts and
+		/// room account data.
+		Collect => "collect",
+		/// Collecting the extensions other than the profiles.
+		Extensions => "extensions",
+		/// Collecting the profiles extension.
+		Profiles => "profiles",
 		/// Storing the connection state the response leaves behind.
 		Store => "store",
+	}
+}
+
+label_set! {
+	/// How a sliding sync request was answered.
+	pub enum V5Path("path") {
+		/// By the gate, with no pass and no connection saved.
+		Quiet => "quiet",
+		/// After a pass, with the connection saved.
+		Pass => "pass",
 	}
 }
 
@@ -242,6 +259,8 @@ label_set! {
 	/// The point of a sliding sync request at which the shadow comparison of a
 	/// wait on the sync journal was made.
 	pub enum WaitStage("stage") {
+		/// After the first pass of a request the gate would have let wait.
+		Gate => "gate",
 		/// After the pass that followed a wake of the database watchers.
 		Woken => "woken",
 		/// After the wait ran out of time.
@@ -292,6 +311,8 @@ pub struct SyncMetrics {
 	v5_wait_wakes: EnumFamily<WakeReason, Counter>,
 	v5_pass: EnumFamily<Pass, Histogram<15>>,
 	v5_phase: EnumFamily<V5Phase, Histogram<15>>,
+	v5_requests: EnumFamily<V5Path, Counter>,
+	v5_fresh_payloads: Histogram<15>,
 	v5_connections_loaded: Gauge,
 	v5_connections_stored: Seen<Gauge>,
 	v5_state_bytes: Histogram<7>,
@@ -339,6 +360,8 @@ impl SyncMetrics {
 			v5_wait_wakes: EnumFamily::new(Counter::new),
 			v5_pass: EnumFamily::new(|| Histogram::seconds(&SECONDS)),
 			v5_phase: EnumFamily::new(|| Histogram::seconds(&SECONDS)),
+			v5_requests: EnumFamily::new(Counter::new),
+			v5_fresh_payloads: Histogram::new(&ROOMS),
 			v5_connections_loaded: Gauge::new(),
 			v5_connections_stored: Seen::new(Gauge::new()),
 			v5_state_bytes: Histogram::new(&STATE_BYTES),
@@ -489,6 +512,14 @@ impl SyncMetrics {
 	/// Starts timing one phase of a sliding sync pass; the time is recorded
 	/// when the timer is dropped.
 	pub fn v5_phase(&self, phase: V5Phase) -> Timer<'_, 15> { self.v5_phase.get(phase).start() }
+
+	#[inline]
+	/// Counts a sliding sync request as answered by the gate or after a pass.
+	pub fn v5_request(&self, path: V5Path) { self.v5_requests.get(path).inc(); }
+
+	#[inline]
+	/// Records how many rooms one sliding sync pass built a payload for anew.
+	pub fn v5_fresh_payloads(&self, rooms: u64) { self.v5_fresh_payloads.observe(rooms); }
 
 	#[inline]
 	/// Counts a sliding sync request answered with an unknown position.
@@ -645,6 +676,14 @@ impl SyncMetrics {
 	pub fn v5_phases(&self, phase: V5Phase) -> u64 { self.v5_phase.get(phase).count() }
 
 	#[must_use]
+	/// Returns the number of sliding sync requests answered by a path.
+	pub fn v5_requests_total(&self, path: V5Path) -> u64 { self.v5_requests.get(path).get() }
+
+	#[must_use]
+	/// Returns the number of sliding sync passes whose rebuilt rooms were counted.
+	pub fn v5_fresh_payload_passes(&self) -> u64 { self.v5_fresh_payloads.count() }
+
+	#[must_use]
 	/// Returns the number of unknown position answers counted.
 	pub fn v5_unknown_positions(&self) -> u64 { self.v5_unknown_pos.get() }
 
@@ -747,16 +786,29 @@ impl SyncMetrics {
 		w.metric(
 			"tuwunel_sync_v5_pass_seconds",
 			"Time of one pass of a sliding sync request, not counting the wait for activity; \
-			 first is the opening pass, woken a pass after the watchers fired.",
+			 first is the opening pass, woken one after a wake of the watchers, journal or gate.",
 			&self.v5_pass,
 		);
 		w.metric(
 			"tuwunel_sync_v5_phase_seconds",
 			"Time one part of a sliding sync pass spent running, by phase: watch registers the \
-			 watchers, select picks the rooms and lists, ranges collects the rooms and \
-			 extensions of the response, store saves the connection; not counting the wait for \
-			 activity.",
+			 watchers, select picks the rooms and lists, collect gathers the ranges of the \
+			 window rooms, extensions gathers the extensions other than the profiles, profiles \
+			 gathers the profiles extension, store saves the connection; collect and extensions \
+			 run side by side, so their times overlap; not counting the wait for activity.",
 			&self.v5_phase,
+		);
+		w.metric(
+			"tuwunel_sync_v5_requests_total",
+			"Sliding sync requests by how they were answered: quiet by the gate with no pass \
+			 and no connection saved, pass after a pass.",
+			&self.v5_requests,
+		);
+		w.metric(
+			"tuwunel_sync_v5_fresh_payloads_per_pass",
+			"Rooms one sliding sync pass built a payload for anew, counted for the passes that \
+			 collect ranges.",
+			&self.v5_fresh_payloads,
 		);
 		w.metric(
 			"tuwunel_sync_v5_connections_loaded",
@@ -888,6 +940,8 @@ impl SyncMetrics {
 			self.v5_wait_wakes.series(),
 			self.v5_pass.series(),
 			self.v5_phase.series(),
+			self.v5_requests.series(),
+			self.v5_fresh_payloads.series(),
 			self.v5_connections_loaded.series(),
 			self.v5_connections_stored.series(),
 			self.v5_state_bytes.series(),

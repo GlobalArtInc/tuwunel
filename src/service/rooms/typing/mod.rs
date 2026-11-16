@@ -1,5 +1,6 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
+use async_trait::async_trait;
 use futures::{FutureExt, StreamExt, TryStreamExt, future::try_join, stream::unfold};
 use ruma::{
 	OwnedRoomId, OwnedUserId, RoomId, UserId,
@@ -12,9 +13,12 @@ use ruma::{
 		typing::TypingEventContent,
 	},
 };
-use tokio::sync::{
-	RwLock,
-	broadcast::{self, error::RecvError},
+use tokio::{
+	sync::{
+		RwLock,
+		broadcast::{self, error::RecvError},
+	},
+	time::sleep,
 };
 use tuwunel_core::{
 	Result, Server,
@@ -23,9 +27,16 @@ use tuwunel_core::{
 	metrics::prom::JournalKind,
 	trace,
 	utils::{BoolExt, IterStream, millis_since_unix_epoch},
+	warn,
 };
 
 use crate::sending::EduBuf;
+
+/// How often the worker looks for typists whose indicator has run out.
+///
+/// An indicator ends no sooner than its timeout, and a client waiting on the
+/// journal or the watchers learns it ended up to this long after.
+const TYPING_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 
 pub struct Service {
 	server: Arc<Server>,
@@ -43,6 +54,7 @@ struct RoomTyping {
 	update: u64,
 }
 
+#[async_trait]
 impl crate::Service for Service {
 	fn build(args: &crate::Args<'_>) -> Result<Arc<Self>> {
 		Ok(Arc::new(Self {
@@ -51,6 +63,17 @@ impl crate::Service for Service {
 			typing: RwLock::new(BTreeMap::new()),
 			typing_update_sender: broadcast::channel(100).0,
 		}))
+	}
+
+	async fn worker(self: Arc<Self>) -> Result {
+		loop {
+			tokio::select! {
+				() = sleep(TYPING_SWEEP_INTERVAL) => {},
+				() = self.server.until_shutdown() => return Ok(()),
+			}
+
+			self.sweep().await;
+		}
 	}
 
 	fn name(&self) -> &str { crate::service::make_name(std::module_path!()) }
@@ -211,6 +234,28 @@ impl Service {
 					.is_some_and(|room| room.update > since || room.has_expired(now))
 			})
 			.await
+	}
+
+	/// Ends the indicators that ran out in every room that holds one.
+	///
+	/// An indicator otherwise ends when a pass reads its room, which a client
+	/// waiting on the journal or the watchers never triggers, so its end would
+	/// come only with the next change of that client's account. The rooms are
+	/// found under the read lock alone, which is never held across an await, and
+	/// ended one at a time, so a room that ended meanwhile is left as it is.
+	async fn sweep(&self) {
+		let now = millis_since_unix_epoch();
+		let expired = self
+			.typing
+			.read()
+			.map(|typing| expired_rooms(&typing, now))
+			.await;
+
+		for room_id in &expired {
+			if let Err(error) = self.typings_maintain(room_id).await {
+				warn!(%room_id, %error, "Failed to announce the end of expired typing");
+			}
+		}
 	}
 
 	/// Makes sure that typing events with old timestamps get removed.
@@ -457,6 +502,14 @@ impl RoomTyping {
 	fn has_expired(&self, now: u64) -> bool { self.users.values().any(|timeout| *timeout < now) }
 }
 
+fn expired_rooms(typing: &BTreeMap<OwnedRoomId, RoomTyping>, now: u64) -> Vec<OwnedRoomId> {
+	typing
+		.iter()
+		.filter(|(_, room)| room.has_expired(now))
+		.map(|(room_id, _)| room_id.clone())
+		.collect()
+}
+
 fn typing_rooms(typing: &BTreeMap<OwnedRoomId, RoomTyping>) -> Vec<OwnedRoomId> {
 	typing
 		.iter()
@@ -471,7 +524,7 @@ mod tests {
 
 	use ruma::{room_id, user_id};
 
-	use super::{RoomTyping, typing_rooms};
+	use super::{RoomTyping, expired_rooms, typing_rooms};
 
 	#[test]
 	fn a_room_is_listed_while_it_holds_an_indicator_even_an_expired_one() {
@@ -493,6 +546,34 @@ mod tests {
 		assert_eq!(typing_rooms(&typing), [
 			room_id!("!expired:localhost").to_owned(),
 			room_id!("!live:localhost").to_owned(),
+		]);
+	}
+
+	#[test]
+	fn only_a_room_with_a_run_out_indicator_is_swept() {
+		let mut typing = BTreeMap::new();
+
+		typing.insert(room_id!("!live:localhost").to_owned(), RoomTyping {
+			users: BTreeMap::from([(user_id!("@a:localhost").to_owned(), 20)]),
+			update: 7,
+		});
+		typing.insert(room_id!("!mixed:localhost").to_owned(), RoomTyping {
+			users: BTreeMap::from([
+				(user_id!("@b:localhost").to_owned(), 20),
+				(user_id!("@c:localhost").to_owned(), 9),
+			]),
+			update: 8,
+		});
+		typing.insert(room_id!("!stopped:localhost").to_owned(), RoomTyping {
+			users: BTreeMap::new(),
+			update: 9,
+		});
+
+		assert_eq!(expired_rooms(&typing, 10), [room_id!("!mixed:localhost").to_owned()]);
+		assert!(expired_rooms(&typing, 9).is_empty());
+		assert_eq!(expired_rooms(&typing, 21), [
+			room_id!("!live:localhost").to_owned(),
+			room_id!("!mixed:localhost").to_owned(),
 		]);
 	}
 }

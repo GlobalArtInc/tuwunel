@@ -960,6 +960,65 @@ fn room_cbor_leaves_out_the_checkpoint() {
 }
 
 #[test]
+fn connection_cbor_leaves_out_what_a_quiet_answer_repeats() {
+	let kept = Connection {
+		next_batch: 9,
+		last_counts: Some([(list_id(), UInt::from(4_u32))].into()),
+		ranges_owed: true,
+		..Default::default()
+	};
+
+	let bytes = to_vec(&kept).expect("connection must encode");
+	let decoded: Connection = from_slice(&bytes).expect("connection must decode");
+	let bare = Connection { next_batch: 9, ..Default::default() };
+
+	assert_eq!(decoded.next_batch, 9);
+	assert!(decoded.last_counts.is_none());
+	assert!(!decoded.ranges_owed);
+	assert_eq!(bytes, to_vec(&bare).expect("connection must encode"));
+}
+
+#[test]
+fn a_request_changing_only_an_extension_flag_reports_a_changed_setting() {
+	let mut conn = Connection::default();
+
+	assert_eq!(conn.update_cache_tracked(&request_with_typing(true)), (false, true));
+	assert_eq!(conn.update_cache_tracked(&request_with_typing(true)), (false, false));
+	assert_eq!(conn.update_cache_tracked(&request_with_typing(false)), (false, true));
+	assert_eq!(conn.update_cache_tracked(&Request::new()), (false, false));
+}
+
+#[test]
+fn a_new_to_device_token_or_limit_is_not_a_changed_setting() {
+	let mut conn = Connection::default();
+	let mut request = Request::new();
+
+	request.extensions.to_device.enabled = Some(true);
+	request.extensions.to_device.since = Some("5".into());
+	request.extensions.to_device.limit = Some(UInt::from(2_u32));
+
+	assert_eq!(conn.update_cache_tracked(&request), (false, true));
+
+	request.extensions.to_device.since = Some("9".into());
+	request.extensions.to_device.limit = Some(UInt::from(3_u32));
+
+	assert_eq!(conn.update_cache_tracked(&request), (false, false));
+	assert_eq!(conn.extensions.to_device.since.as_deref(), Some("9"));
+}
+
+#[test]
+fn a_changed_list_is_a_config_change_and_no_changed_setting() {
+	let mut conn = Connection::default();
+	let mut request = Request::new();
+
+	request
+		.lists
+		.insert(list_id(), list_with_ranges(&[(0, 9)]));
+
+	assert_eq!(conn.update_cache_tracked(&request), (true, false));
+}
+
+#[test]
 fn dropping_one_connection_keeps_the_rest() {
 	let filters =
 		(Some(user_id!("@alice:localhost")), Some(device_id!("PHONE")), Some("room-list"));
@@ -1129,6 +1188,14 @@ fn request_with_profiles(enabled: bool) -> Request {
 	let mut request = Request::new();
 
 	request.extensions.profiles.enabled = Some(enabled);
+
+	request
+}
+
+fn request_with_typing(enabled: bool) -> Request {
+	let mut request = Request::new();
+
+	request.extensions.typing.enabled = Some(enabled);
 
 	request
 }

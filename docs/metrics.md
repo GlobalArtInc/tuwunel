@@ -121,6 +121,8 @@ shares the `_other` series.
 | `tuwunel_sync_v5_wait_wakes_total` | counter | `reason` |
 | `tuwunel_sync_v5_pass_seconds` | histogram | `pass` |
 | `tuwunel_sync_v5_phase_seconds` | histogram | `phase` |
+| `tuwunel_sync_v5_requests_total` | counter | `path` |
+| `tuwunel_sync_v5_fresh_payloads_per_pass` | histogram | none |
 | `tuwunel_sync_v5_response_rooms` | histogram | none |
 | `tuwunel_sync_v5_unknown_pos_total` | counter | none |
 | `tuwunel_sync_v5_connections_loaded` | gauge | none |
@@ -130,8 +132,10 @@ shares the `_other` series.
 | `tuwunel_timeline_last_normal_entries` | gauge | none |
 
 `api` is `v3` or `v5`. `since` is `initial` or `incremental`. `pass` is `first`
-for the opening pass of a sliding sync request and `woken` for a pass after the
-watchers fired. `tuwunel_sync_fastpath_mismatches_total` should stay at zero; a
+for the opening pass of a sliding sync request and `woken` for a pass that follows
+a wake: the watchers firing, the journal naming a change, or the wake of the gate
+that held the request before its pass, so such a request counts no `first` pass.
+`tuwunel_sync_fastpath_mismatches_total` should stay at zero; a
 nonzero value means the fast path disagreed with the full computation.
 `tuwunel_sync_v5_connection_state_bytes` leaves out the empty state stored when
 a client resets its connection.
@@ -218,8 +222,8 @@ longer covers the position the wait began from. `tuwunel_sync_v3_wait_wakes_tota
 a long poll that waits through the journal ended, by `reason`, and is counted only while
 `journal_wait` is on and `journal_wait_verify` is off.
 
-A sliding sync pass registers the same database watchers as a legacy sync build, and
-`tuwunel_sync_v3_watch_seconds` and `tuwunel_sync_v3_watchers_per_sync` count them
+A sliding sync pass registers the same kinds of database watchers as a legacy sync build,
+and `tuwunel_sync_v3_watch_seconds` and `tuwunel_sync_v3_watchers_per_sync` count them
 whichever API registered them. With `v5_journal_wait` on, a sliding sync request registers
 none, waits through the journal as above, and adds nothing to those two metrics, nor to
 the `watch` phase of `tuwunel_sync_v5_phase_seconds`.
@@ -229,10 +233,38 @@ is off; a request whose client went away during the wait is not counted.
 `tuwunel_sync_v5_wait_verify_total` counts the verdicts of the shadow comparison of the
 journal with the database watchers, by `stage` and `verdict` as for the legacy sync, and is
 counted only while `v5_journal_wait_verify` is on. `stage` is `woken` for the pass that
-followed a wake of the watchers, compared over the positions that pass read, and `timeout`
-for a long poll that ran out of time. A key count or fallback key type alone is not data
-for the `woken` verdict. A comparison with no verdict is skipped when the journal no longer
-covers the position the wait began from.
+followed a wake of the watchers, compared over the positions that pass read, `timeout` for a
+long poll that ran out of time, and `gate` for the first pass of a request the gate would
+have held, compared over the positions from the request's `pos` up to the one that pass
+read. A key count or fallback key type alone is not data for the `woken` and `gate`
+verdicts. For `gate`, `quiet` means the journal named nothing and the pass found nothing, so
+the gate would have saved the pass; `journal_extra` means the journal named a change the
+pass found nothing for, such as a receipt in a room outside the window, which the gate
+lets through; `both` and `miss` are as for `woken`. A comparison with no verdict is skipped
+when the journal no longer covers the position the wait began from.
+
+With `v5_journal_wait` on, a sliding sync request that resumes from a `pos` with a timeout
+waits through the journal before its first pass, and is answered without a pass when
+nothing concerning the account came before the timeout: the answer repeats the `pos` and
+the list counts of the last pass, carries only the one-time key counts and fallback key
+types, and leaves the stored connection and its position untouched. Such a request
+acknowledges to-device events when it arrives, and a token beyond the connection's
+position deletes nothing. A request goes straight to its pass when it changed the lists,
+the subscriptions or a setting of an extension, owes a profile, leaves to-device events
+past the `limit`, follows a pass that failed to collect a room, or has no list counts to
+repeat, as after a restart.
+`phase` on `tuwunel_sync_v5_phase_seconds` is `watch`, `select`, `collect` (the ranges of
+the window rooms: payloads, receipts and room account data), `extensions` (the extensions
+other than profiles), `profiles` or `store`. A pass collects `collect` and `extensions`
+side by side, so their times overlap, and `profiles` follows them; the `ranges` phase of
+earlier builds, which spanned all three, is gone. The pass time not in a phase is the work
+in memory between them.
+`tuwunel_sync_v5_fresh_payloads_per_pass` counts, for each pass that collects ranges, the
+rooms whose payload it built anew, whether or not building it succeeded, which is the part
+of `collect` that costs the most per room; a pass that collects nothing is not counted.
+`tuwunel_sync_v5_requests_total` counts the requests that were answered, by `path`:
+`quiet` for the answers of the gate and `pass` for the answers after a pass; a request
+that failed is in neither.
 
 ### Database
 

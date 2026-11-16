@@ -31,7 +31,7 @@ use tuwunel_core::{
 	debug::INFO_SPAN_LEVEL,
 	debug_warn,
 	error::inspect_log,
-	metrics::prom::{Api, Pass, V5Phase},
+	metrics::prom::{Api, Pass, Registry, V5Path, V5Phase},
 	smallvec::SmallVec,
 	trace,
 	utils::{
@@ -53,7 +53,10 @@ use self::{
 		acknowledge_to_device, apply_profiles, apply_ranges, check_to_device,
 		handle as handle_extensions, to_device_pending,
 	},
-	journal::{Ended, Wait, verify_timeout, verify_woken, wait_for_change},
+	journal::{
+		Arrival, Checked, Ended, Gated, Wait, gate, list_counts, verify_pass, verify_timeout,
+		wait_for_change,
+	},
 	range::collect as collect_ranges,
 	selector::selector,
 };
@@ -199,11 +202,37 @@ pub(crate) async fn sync_events_v5_route(
 	);
 
 	// Update parameters regardless of replay or advance
+	conn.globalsince = since;
+	let (config_changed, settings_changed) = conn.update_cache_tracked(request);
+	let stop_at = poll_deadline(timeout);
+
+	let arrival = Arrival {
+		since,
+		advancing,
+		config_changed,
+		settings_changed,
+		timeout,
+	};
+	let passage = match gate(
+		services,
+		(sender_user, sender_device),
+		request,
+		&conn,
+		arrival,
+		(&interrupted, stop_at),
+	)
+	.await?
+	{
+		| Gated::Quiet(response) => return Ok(*response),
+		| Gated::Pass(passage) => passage,
+	};
+
 	conn.next_batch = services.globals.wait_pending().await?;
 	conn.globalsince = since.min(conn.next_batch);
-	let config_changed = conn.update_cache(request);
 
-	acknowledge_to_device(services, sender_user, sender_device, &conn).await?;
+	if !passage.acknowledged {
+		acknowledge_to_device(services, sender_user, sender_device, &conn).await?;
+	}
 
 	let caught_up = conn.globalsince == conn.next_batch;
 
@@ -228,10 +257,9 @@ pub(crate) async fn sync_events_v5_route(
 		extensions: Default::default(),
 	};
 
-	let stop_at = poll_deadline(timeout);
-	let mut woke_after: Option<u64> = None;
+	let mut verify_after = passage.checked.then_some((Checked::Gate, since));
 
-	for woken in once(false).chain(repeat(true)) {
+	for woken in once(passage.woken).chain(repeat(true)) {
 		debug_assert!(
 			conn.globalsince <= conn.next_batch,
 			"since should not be greater than next_batch."
@@ -239,7 +267,7 @@ pub(crate) async fn sync_events_v5_route(
 
 		let wait = Wait::current(services);
 		if wait != Wait::Verify {
-			woke_after = None;
+			verify_after = None;
 		}
 
 		let pass = registry.map(|registry| {
@@ -288,47 +316,67 @@ pub(crate) async fn sync_events_v5_route(
 		let select_phase = registry.map(|registry| registry.sync.v5_phase(V5Phase::Select));
 		(window, response.lists) = selector(&mut conn, sync_info).await;
 		drop(select_phase);
+		conn.last_counts = Some(list_counts(&response.lists));
 
-		if conn.globalsince < conn.next_batch {
-			let ranges_phase = registry.map(|registry| registry.sync.v5_phase(V5Phase::Ranges));
-			let ranges = collect_ranges(sync_info, &conn, &window);
-			let extensions = handle_extensions(sync_info, &conn, &window);
+		let ran = conn.globalsince < conn.next_batch;
+		let answers = if ran {
+			let ranges =
+				phased(registry, V5Phase::Collect, collect_ranges(sync_info, &conn, &window));
+			let extensions = phased(
+				registry,
+				V5Phase::Extensions,
+				handle_extensions(sync_info, &conn, &window),
+			);
+
 			let (mut ranges, extensions) = join(ranges, extensions).await;
 
 			let mut extensions = extensions?;
 
-			apply_profiles(sync_info, &conn, &window, &ranges, &mut extensions).await?;
+			phased(
+				registry,
+				V5Phase::Profiles,
+				apply_profiles(sync_info, &conn, &window, &ranges, &mut extensions),
+			)
+			.await?;
+
 			apply_ranges(&conn, &window, &mut ranges, &mut extensions);
 			conn.update_rooms_epilogue(since, ranges.room_updates());
 			conn.update_profiles_epilogue();
+			conn.ranges_owed = ranges.failed() > 0;
+
+			if let Some(registry) = registry {
+				registry
+					.sync
+					.v5_fresh_payloads(u64::try_from(ranges.fresh()).unwrap_or(u64::MAX));
+			}
+
 			response.rooms = ranges.into_payloads();
 			let keys_answer = woken || extensions.keys_changed();
 
 			response.extensions = extensions.into_response(&response.rooms);
 
-			if let Some(woke_after) = woke_after.take() {
-				verify_woken(
-					services,
-					sender_user,
-					sender_device,
-					(woke_after, next_batch),
-					Some(&mut response),
-				)
-				.await;
-			}
-
-			if !is_empty_response(&mut response, keys_answer) {
-				drop(ranges_phase);
-				drop(pass);
-
-				return respond(services, (&conn_key, &conn_val), &conn, response).await;
-			}
-		} else if let Some(woke_after) = woke_after.take() {
-			verify_woken(services, sender_user, sender_device, (woke_after, next_batch), None)
-				.await;
-		}
+			!is_empty_response(&mut response, keys_answer)
+		} else {
+			false
+		};
 
 		drop(pass);
+
+		if let Some((checked, after)) = verify_after.take() {
+			verify_pass(
+				services,
+				sender_user,
+				sender_device,
+				checked,
+				(after, next_batch),
+				ran.then_some(&mut response),
+			)
+			.await;
+		}
+
+		if answers {
+			return respond(services, (&conn_key, &conn_val), &conn, response).await;
+		}
 
 		let waiter = async || {
 			let _long_poll = long_poll(services, Api::V5);
@@ -365,14 +413,28 @@ pub(crate) async fn sync_events_v5_route(
 			last_since = conn.globalsince,
 			last_batch = conn.next_batch,
 			pend_count = ?services.globals.pending_count(),
-			"notified by watcher"
+			"notified"
 		);
 
 		conn.globalsince = conn.next_batch;
-		woke_after = (wait == Wait::Verify).then_some(next_batch);
+		verify_after = (wait == Wait::Verify).then_some((Checked::Woken, next_batch));
 	}
 
 	unreachable!("a long poll has no last pass")
+}
+
+/// Runs a future and records the time it took as a phase of the pass.
+async fn phased<Phase>(
+	registry: Option<&Registry>,
+	phase: V5Phase,
+	future: Phase,
+) -> Phase::Output
+where
+	Phase: Future,
+{
+	let _phase = registry.map(|registry| registry.sync.v5_phase(phase));
+
+	future.await
 }
 
 /// How long a request may long-poll, in milliseconds.
@@ -491,6 +553,10 @@ async fn respond(
 		.await?;
 
 	drop(store_phase);
+
+	if let Some(registry) = services.server.metrics.prometheus() {
+		registry.sync.v5_request(V5Path::Pass);
+	}
 
 	Ok(response)
 }

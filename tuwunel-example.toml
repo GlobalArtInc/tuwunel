@@ -1315,7 +1315,12 @@
 
 # A sliding sync long poll waits for changes through the change journal
 # instead of registering database watchers, which cuts the cost of every
-# pass for accounts with many rooms. Needs `journal_capacity` above 0.
+# pass for accounts with many rooms. A request resuming from a position
+# first waits on the journal and is answered without a pass, repeating its
+# position, when nothing concerning the account came before its timeout.
+# That request acknowledges to-device events when it arrives, and a token
+# beyond the connection's position deletes nothing. Needs
+# `journal_capacity` above 0.
 # Run `v5_journal_wait_verify` first and check that
 # `tuwunel_sync_v5_wait_verify_total{verdict="miss"}` stays at 0.
 # `v5_journal_wait_verify` takes precedence.

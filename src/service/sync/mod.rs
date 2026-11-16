@@ -16,7 +16,7 @@ use std::{
 
 use futures::Stream;
 use ruma::{
-	DeviceId, OwnedDeviceId, OwnedRoomId, OwnedUserId, RoomId, UserId,
+	DeviceId, OwnedDeviceId, OwnedRoomId, OwnedUserId, RoomId, UInt, UserId,
 	api::client::sync::sync_events::v5::{
 		ConnId as ConnectionId, ListId, Request, request,
 		request::{AccountData, E2EE, Profiles, Receipts, ToDevice, Typing},
@@ -95,6 +95,22 @@ pub struct Connection {
 	/// owes when the extension goes off.
 	#[serde(default)]
 	pub profiles_fields_widened: bool,
+
+	/// The list counts the last pass answered with, kept in memory only.
+	///
+	/// A request answered without a pass repeats them. Empty after a restart and
+	/// when the client resets the connection, so such a connection has no counts
+	/// to repeat and gets a pass.
+	#[serde(skip)]
+	pub last_counts: Option<BTreeMap<ListId, UInt>>,
+
+	/// Whether the last pass left a room of its window uncollected, kept in memory
+	/// only.
+	///
+	/// The next pass collects that room again, so a connection owing it is not
+	/// answered without a pass.
+	#[serde(skip)]
+	pub ranges_owed: bool,
 }
 
 /// Delivery progress for one room on a Sliding Sync connection.
@@ -640,6 +656,33 @@ pub fn update_cache(&mut self, request: &Request) -> bool {
 	lists_changed
 		|| subscriptions_changed
 		|| (!e2ee_enabled && self.extensions.e2ee.enabled == Some(true))
+}
+
+/// Merges the request into the connection like [`Self::update_cache`], and
+/// also reports whether it changed an extension setting the connection keeps
+/// for the requests after it.
+///
+/// A setting is kept when a request may leave it out and the connection then
+/// remembers it, such as the flag that switches an extension on. The to-device
+/// token and limit are not kept, since every request replaces them. Returns
+/// whether a list, subscription or the e2ee extension changed, as `update_cache`
+/// does, and whether a kept setting changed.
+#[implement(Connection)]
+#[tracing::instrument(level = "debug", skip_all)]
+pub fn update_cache_tracked(&mut self, request: &Request) -> (bool, bool) {
+	let before = self.kept_extensions();
+	let config_changed = self.update_cache(request);
+
+	(config_changed, before != self.kept_extensions())
+}
+
+#[implement(Connection)]
+fn kept_extensions(&self) -> request::Extensions {
+	let mut kept = self.extensions.clone();
+	kept.to_device.since = None;
+	kept.to_device.limit = None;
+
+	kept
 }
 
 #[implement(Connection)]
