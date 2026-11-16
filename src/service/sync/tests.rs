@@ -989,12 +989,14 @@ fn connection_cbor_leaves_out_the_room_index() {
 		built: Instant::now(),
 		digest: 3,
 		members: HashSet::from([room_id.clone()]),
-		selected: HashMap::from([(room_id, IndexedRoom {
+		selected: HashMap::from([(room_id.clone(), IndexedRoom {
 			membership: None,
 			lists: once(list_id()).collect(),
 			event_count: 4,
 			payload_count: 5,
 		})]),
+		window: HashSet::from([room_id.clone()]),
+		owed: HashSet::from([room_id]),
 	};
 
 	let kept = Connection {
@@ -1012,7 +1014,7 @@ fn connection_cbor_leaves_out_the_room_index() {
 	assert_eq!(bytes, to_vec(&bare).expect("connection must encode"));
 	assert_eq!(
 		format!("{:?}", kept.index.expect("index must be kept")),
-		"RoomIndex { at: 9, digest: 3, members: 1, selected: 1, .. }"
+		"RoomIndex { at: 9, digest: 3, members: 1, selected: 1, window: 1, owed: 1, .. }"
 	);
 }
 

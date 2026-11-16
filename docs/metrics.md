@@ -123,6 +123,7 @@ shares the `_other` series.
 | `tuwunel_sync_v5_phase_seconds` | histogram | `phase` |
 | `tuwunel_sync_v5_requests_total` | counter | `path` |
 | `tuwunel_sync_v5_fresh_payloads_per_pass` | histogram | none |
+| `tuwunel_sync_v5_ranges_per_pass` | histogram | none |
 | `tuwunel_sync_v5_response_rooms` | histogram | none |
 | `tuwunel_sync_v5_unknown_pos_total` | counter | none |
 | `tuwunel_sync_v5_connections_loaded` | gauge | none |
@@ -262,6 +263,11 @@ in memory between them.
 `tuwunel_sync_v5_fresh_payloads_per_pass` counts, for each pass that collects ranges, the
 rooms whose payload it built anew, whether or not building it succeeded, which is the part
 of `collect` that costs the most per room; a pass that collects nothing is not counted.
+`tuwunel_sync_v5_ranges_per_pass` counts, for each pass that collects ranges, the rooms of
+its window it collected them for: every room of the window, or with `v5_candidates` on and
+the rooms taken from the index, only the rooms the pass owes (see below). The rooms
+collected are those whose payload, receipts and room account data are read; a room whose
+collection failed is counted.
 `tuwunel_sync_v5_requests_total` counts the requests that were answered, by `path`:
 `quiet` for the answers of the gate and `pass` for the answers after a pass; a request
 that failed is in neither.
@@ -285,6 +291,17 @@ rejecting for `overflow` or `account_data` is one the index does not help.
 rooms it looked at again: those the journal names that the user is in, was in, or has
 in the index, or whose membership of the user changed.
 
+A pass that took its rooms from the index also collects the ranges (payload, receipts and
+room account data) of the rooms of its window it owes, and no others. A room is owed when
+the journal names it since the index was exact, when it entered the window (the window
+grew, or the room rose into it, or the connection subscribed to it), when it is a
+retraction of a room the user left, when its payload is newer than what was delivered or
+was never delivered, when the configuration it is delivered under changed (a list's
+timeline limit or required state, or a subscription), and when an earlier pass failed to
+collect it. A room is owed until a pass collects it, so one that fails is collected again
+by the next pass. A pass that looks at every room collects every room of the window, as
+before, and so does every pass with the switches off.
+
 With `v5_candidates_verify` on, a pass is answered from every room of the account as
 before, and the index is revised beside it and compared with the answer. The
 comparison covers what a client sees, the rooms of the window with their membership,
@@ -300,7 +317,10 @@ counts these comparisons by `reason`: `explained` for a pass with a difference s
 and `journal` for a pass the journal could not judge; neither is a mismatch, and a count
 that grows with every pass shows the shadow is blind rather than clean.
 `tuwunel_sync_v5_candidates_mismatch_total` counts every other difference by `part`:
-`window` for a room the two answers do not agree on, `count` for a list counted otherwise.
+`window` for a room the two answers do not agree on, `count` for a list counted otherwise,
+`range` for a room of the window that the index would have collected nothing for and in
+which the full pass found a payload, receipts or room account data to send, which is a
+change of that room the journal does not name.
 Each is logged as an error with the user, the room or list, the position of the index and
 the position of the pass; at most 32 differences of a pass are logged one by one. A
 mismatch is a difference that is not in the journal and that no write after the pass

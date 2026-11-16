@@ -171,6 +171,9 @@ label_set! {
 		Window => "window",
 		/// The count of a list.
 		Count => "count",
+		/// A room outside the rooms the index collects the ranges of, for which the
+		/// full pass collected a payload, receipts or account data.
+		Range => "range",
 	}
 }
 
@@ -376,6 +379,7 @@ pub struct SyncMetrics {
 	v5_phase: EnumFamily<V5Phase, Histogram<15>>,
 	v5_requests: EnumFamily<V5Path, Counter>,
 	v5_fresh_payloads: Histogram<15>,
+	v5_ranges_per_pass: Histogram<15>,
 	v5_select_paths: EnumFamily<(SelectPath, SelectReason), Counter>,
 	v5_candidates_per_pass: Histogram<15>,
 	v5_candidates_mismatches: EnumFamily<Mismatch, Counter>,
@@ -429,6 +433,7 @@ impl SyncMetrics {
 			v5_phase: EnumFamily::new(|| Histogram::seconds(&SECONDS)),
 			v5_requests: EnumFamily::new(Counter::new),
 			v5_fresh_payloads: Histogram::new(&ROOMS),
+			v5_ranges_per_pass: Histogram::new(&ROOMS),
 			v5_select_paths: EnumFamily::new(Counter::new),
 			v5_candidates_per_pass: Histogram::new(&ROOMS),
 			v5_candidates_mismatches: EnumFamily::new(Counter::new),
@@ -591,6 +596,11 @@ impl SyncMetrics {
 	#[inline]
 	/// Records how many rooms one sliding sync pass built a payload for anew.
 	pub fn v5_fresh_payloads(&self, rooms: u64) { self.v5_fresh_payloads.observe(rooms); }
+
+	#[inline]
+	/// Records how many rooms of its window one sliding sync pass collected the
+	/// ranges of.
+	pub fn v5_ranges(&self, rooms: u64) { self.v5_ranges_per_pass.observe(rooms); }
 
 	#[inline]
 	/// Counts a sliding sync pass by where it took its rooms from and, for the full
@@ -779,6 +789,10 @@ impl SyncMetrics {
 	#[must_use]
 	/// Returns the number of sliding sync passes whose rebuilt rooms were counted.
 	pub fn v5_fresh_payload_passes(&self) -> u64 { self.v5_fresh_payloads.count() }
+
+	#[must_use]
+	/// Returns the number of sliding sync passes whose collected rooms were counted.
+	pub fn v5_range_passes(&self) -> u64 { self.v5_ranges_per_pass.count() }
 
 	#[must_use]
 	/// Returns the number of sliding sync passes counted for a path and a reason.
@@ -981,6 +995,13 @@ impl SyncMetrics {
 			&self.v5_select_paths,
 		);
 		w.metric(
+			"tuwunel_sync_v5_ranges_per_pass",
+			"Rooms of its window one sliding sync pass collected the ranges of, counted for the \
+			 passes that collect ranges: every room of the window, or the rooms the pass owes \
+			 when it takes its rooms from the index.",
+			&self.v5_ranges_per_pass,
+		);
+		w.metric(
 			"tuwunel_sync_v5_candidates_per_pass",
 			"Rooms the journal had one sliding sync pass revise in the index of its connection, \
 			 after leaving out the rooms the account has nothing to do with.",
@@ -1095,6 +1116,7 @@ impl SyncMetrics {
 			self.v5_phase.series(),
 			self.v5_requests.series(),
 			self.v5_fresh_payloads.series(),
+			self.v5_ranges_per_pass.series(),
 			self.v5_select_paths.series(),
 			self.v5_candidates_per_pass.series(),
 			self.v5_candidates_mismatches.series(),

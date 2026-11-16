@@ -21,6 +21,8 @@ use tuwunel_service::{
 use super::{
 	super::invite_permitted_room,
 	ResponseLists, SyncInfo, Window, WindowRoom, departed,
+	range::Results,
+	rooms::{merged_room_details, room_config},
 	selector::{finish, full_path, matcher, room_sort, view},
 };
 
@@ -113,6 +115,67 @@ struct Difference {
 	subject: String,
 }
 
+/// The rooms of the window a pass collects the ranges of.
+pub(super) enum Dirty {
+	/// Every room of the window, as the pass that chose its rooms from every room
+	/// of the account collects them.
+	Window,
+
+	/// The rooms of the window the pass owes ranges, and no other: for the rest
+	/// the journal names nothing since the pass before.
+	Rooms(HashSet<OwnedRoomId>),
+
+	/// Every room of the window, with what the index would have left out, to
+	/// compare with what the full pass finds in them.
+	Shadow(Shadow),
+}
+
+/// What the verifying mode keeps of the ranges the index would not have
+/// collected, until the full pass has collected them.
+pub(super) struct Shadow {
+	/// The rooms of the window the index owes no ranges.
+	clean: HashSet<OwnedRoomId>,
+
+	/// The position the index was exact at.
+	at: u64,
+
+	/// The most rooms the journal may name when it is asked about writes after the
+	/// pass.
+	limit: usize,
+}
+
+impl Dirty {
+	/// The only rooms to collect the ranges of, or none when it is every room of
+	/// the window.
+	pub(super) fn only(&self) -> Option<&HashSet<OwnedRoomId>> {
+		match self {
+			| Self::Rooms(rooms) => Some(rooms),
+			| Self::Window | Self::Shadow(_) => None,
+		}
+	}
+
+	/// In the verifying mode, counts a room the full pass found something to send
+	/// in that the index would have collected nothing for.
+	///
+	/// A write after the position the pass reads up to can show in the full pass
+	/// alone, and is not counted, as with the rooms of the window.
+	pub(super) fn verify(
+		&self,
+		services: &Services,
+		sender_user: &UserId,
+		ranges: &Results,
+		next_batch: u64,
+	) {
+		let Self::Shadow(Shadow { clean, at, limit }) = self else {
+			return;
+		};
+
+		let differences = unowed(clean, ranges.with_content());
+
+		judge(services, sender_user, differences, (*at, next_batch, *limit), |_| false);
+	}
+}
+
 /// Chooses the rooms of the lists for one pass, and builds the lists and the
 /// window from them.
 ///
@@ -127,12 +190,18 @@ struct Difference {
 /// that could not vouch for it leaves none behind. A request that repeats a
 /// position the connection has moved past, `replay`, is always answered from
 /// every room.
+///
+/// It also says which rooms of the window the pass is to collect the ranges of:
+/// every room of the window, unless the rooms came from the index, and then the
+/// rooms the pass owes ranges. The index records those as owed at once, and a pass
+/// takes a room off only when it has collected it, so a room the pass does not
+/// collect stays owed.
 #[tracing::instrument(level = "debug", skip_all)]
 pub(super) async fn select(
 	conn: &mut Connection,
 	sync_info: SyncInfo<'_>,
 	replay: bool,
-) -> (Window, ResponseLists) {
+) -> (Window, ResponseLists, Dirty) {
 	let SyncInfo { services, sender_user, .. } = sync_info;
 
 	// MSC4155: a stored invite whose sender the recipient ignores or blocks is
@@ -287,32 +356,37 @@ async fn candidates(
 	invite_filter: &InviteFilter,
 	index: RoomIndex,
 	changes: &Changes,
-) -> Result<(Window, ResponseLists)> {
+) -> Result<(Window, ResponseLists, Dirty)> {
 	let Revised { mut index, mut rooms, revised } =
 		revise(index, changes, conn, sync_info, invite_filter).await?;
 
-	let selection = finish(conn, sync_info, &mut rooms, invite_filter).await;
+	let (window, lists) = finish(conn, sync_info, &mut rooms, invite_filter).await;
 
+	let dirty = owed(conn, &window, &index, changes);
+
+	record(&mut index, &window, dirty.iter().cloned());
 	index.at = conn.next_batch;
 	conn.index = Some(Box::new(index));
 
 	counted(sync_info.services, SelectPath::Candidates, SelectReason::None, Some(revised));
 
-	Ok(selection)
+	Ok((window, lists, Dirty::Rooms(dirty)))
 }
 
 /// Answers from every room of the account, and compares the index revised
 /// beside it with the answer.
 ///
 /// The index is built again from the full pass whatever the comparison found, so
-/// a difference does not carry over to the next pass.
+/// a difference does not carry over to the next pass. It owes the ranges the
+/// revised index owed, since a pass that goes on to collect nothing leaves them
+/// to the next one, which the comparison then judges as the index would have.
 async fn verified(
 	conn: &mut Connection,
 	sync_info: SyncInfo<'_>,
 	invite_filter: &InviteFilter,
 	(index, changes): (RoomIndex, &Changes),
 	digest: u64,
-) -> (Window, ResponseLists) {
+) -> (Window, ResponseLists, Dirty) {
 	let SyncInfo { services, sender_user, .. } = sync_info;
 
 	let at = index.at;
@@ -323,7 +397,7 @@ async fn verified(
 	let (window, lists) = finish(conn, sync_info, &mut rooms, invite_filter).await;
 	let next_batch = conn.next_batch;
 
-	match shadow {
+	let (dirty, owing) = match shadow {
 		| Ok(Revised {
 			index: shadow_index,
 			rooms: mut shadow,
@@ -342,6 +416,15 @@ async fn verified(
 					|| shadow_index.selected.contains_key(room_id)
 					|| members.contains(room_id)
 			});
+
+			let owing = owed(conn, &shadow_window, &shadow_index, changes);
+			let clean = shadow_window
+				.keys()
+				.filter(|room_id| !owing.contains(*room_id))
+				.cloned()
+				.collect();
+
+			(Dirty::Shadow(Shadow { clean, at, limit }), owing)
 		},
 		| Err(error) => {
 			warn!(
@@ -351,12 +434,17 @@ async fn verified(
 			);
 
 			counted(services, SelectPath::Full, SelectReason::Error, None);
+
+			(Dirty::Window, window.keys().cloned().collect())
 		},
-	}
+	};
 
-	conn.index = Some(Box::new(build(next_batch, digest, members, &rooms)));
+	let mut index = build(next_batch, digest, members, &rooms);
 
-	(window, lists)
+	record(&mut index, &window, owing.into_iter());
+	conn.index = Some(Box::new(index));
+
+	(window, lists, dirty)
 }
 
 /// Answers from every room of the account, and keeps an index of what that
@@ -368,15 +456,21 @@ async fn full(
 	invite_filter: &InviteFilter,
 	digest: Option<u64>,
 	reason: SelectReason,
-) -> (Window, ResponseLists) {
+) -> (Window, ResponseLists, Dirty) {
 	counted(sync_info.services, SelectPath::Full, reason, None);
 
 	let (mut rooms, members) = full_path(conn, sync_info, invite_filter, digest.is_some()).await;
-	let selection = finish(conn, sync_info, &mut rooms, invite_filter).await;
+	let (window, lists) = finish(conn, sync_info, &mut rooms, invite_filter).await;
 
-	conn.index = digest.map(|digest| Box::new(build(conn.next_batch, digest, members, &rooms)));
+	conn.index = digest.map(|digest| {
+		let mut index = build(conn.next_batch, digest, members, &rooms);
 
-	selection
+		record(&mut index, &window, window.keys().cloned());
+
+		Box::new(index)
+	});
+
+	(window, lists, Dirty::Window)
 }
 
 /// Revises the rooms of the index the journal names, and gives the rooms the
@@ -529,6 +623,80 @@ async fn retraction(
 	}
 }
 
+/// The rooms of the window a pass owes the ranges of.
+///
+/// A room is owed when a pass failed to collect it, when the journal names it
+/// since the index was exact, when it entered the window, when it is a retraction,
+/// and when collecting it would send a payload anyway: its payload is newer than
+/// what was delivered, or the configuration it is delivered under changed. For any
+/// other room the window had nothing since the pass that collected it.
+fn owed(
+	conn: &Connection,
+	window: &Window,
+	index: &RoomIndex,
+	changes: &Changes,
+) -> HashSet<OwnedRoomId> {
+	window
+		.iter()
+		.filter(|(_, room)| owes(conn, index, changes, room))
+		.map(|(room_id, _)| room_id.clone())
+		.collect()
+}
+
+fn owes(conn: &Connection, index: &RoomIndex, changes: &Changes, room: &WindowRoom) -> bool {
+	let room_id = &room.room_id;
+	let (roomsince, config_hash) = conn
+		.rooms
+		.get(room_id)
+		.map_or((0, 0), |delivered| (delivered.roomsince, delivered.config_hash));
+
+	index.owed.contains(room_id)
+		|| changes.rooms.contains(room_id)
+		|| changes.own_membership.contains(room_id)
+		|| !index.window.contains(room_id)
+		|| departed(room.membership.as_ref())
+		|| room.payload_is_fresh(roomsince)
+		|| room_config(&merged_room_details(conn, &room.lists, room_id)).0 != config_hash
+}
+
+/// Records the window a pass chose, and adds the rooms it is to collect to the
+/// rooms owed.
+fn record(index: &mut RoomIndex, window: &Window, rooms: impl Iterator<Item = OwnedRoomId>) {
+	index.owed.extend(rooms);
+	index.window = window.keys().cloned().collect();
+}
+
+/// Takes the rooms a pass collected off the rooms its connection owes ranges, and
+/// leaves every other.
+///
+/// A room that failed is not among them, so it is collected again.
+pub(super) fn pay<'a>(
+	conn: &mut Connection,
+	collected: impl Iterator<Item = &'a OwnedRoomId> + 'a,
+) {
+	let Some(index) = conn.index.as_mut() else {
+		return;
+	};
+
+	for room_id in collected {
+		index.owed.remove(room_id);
+	}
+}
+
+/// The rooms the full pass found something to send in that the index left out.
+fn unowed<'a>(
+	clean: &HashSet<OwnedRoomId>,
+	content: impl Iterator<Item = &'a OwnedRoomId> + 'a,
+) -> Vec<Difference> {
+	content
+		.filter(|room_id| clean.contains(*room_id))
+		.map(|room_id| Difference {
+			part: Mismatch::Range,
+			subject: room_id.to_string(),
+		})
+		.collect()
+}
+
 fn apply(index: &mut RoomIndex, revision: Revision) {
 	let Revision { room_id, member, entry } = revision;
 
@@ -598,6 +766,8 @@ fn build(at: u64, digest: u64, members: HashSet<OwnedRoomId>, rooms: &[WindowRoo
 		digest,
 		members,
 		selected,
+		window: HashSet::new(),
+		owed: HashSet::new(),
 	}
 }
 
@@ -716,7 +886,7 @@ fn settle(
 		.into_iter()
 		.filter(|difference| match difference.part {
 			| Mismatch::Count => !counts_moved,
-			| Mismatch::Window => match RoomId::parse(&difference.subject) {
+			| Mismatch::Window | Mismatch::Range => match RoomId::parse(&difference.subject) {
 				| Ok(room_id) =>
 					!written.rooms.contains(&room_id)
 						&& !written.own_membership.contains(&room_id),
@@ -800,19 +970,23 @@ mod tests {
 		OwnedRoomId,
 		api::client::sync::sync_events::v5::{
 			ListId,
-			request::{List, ListFilters},
+			request::{List, ListConfig, ListFilters},
 			response,
 		},
 		events::room::member::MembershipState,
 		room_id, uint,
 	};
 	use tuwunel_core::metrics::prom::{Mismatch, SelectReason};
-	use tuwunel_service::sync::{Changes, IndexedRoom, Lists, RoomIndex};
+	use tuwunel_service::sync::{Changes, Connection, IndexedRoom, Lists, Room, RoomIndex};
 
 	use super::{
-		super::{ListIds, ResponseLists, Window, WindowRoom},
-		Difference, Facts, LIMIT_FLOOR, Mode, REFRESH, Revision, apply, build, classify, compare,
-		digest, limit, precheck, settle, spaces, touched,
+		super::{
+			ListIds, ResponseLists, Window, WindowRoom,
+			rooms::{merged_room_details, room_config},
+		},
+		Difference, Dirty, Facts, LIMIT_FLOOR, Mode, REFRESH, Revision, apply, build, classify,
+		compare, digest, limit, owed, owes, pay, precheck, record, settle, spaces, touched,
+		unowed,
 	};
 
 	const AT: u64 = 10;
@@ -825,6 +999,8 @@ mod tests {
 			digest: DIGEST,
 			members: HashSet::new(),
 			selected: HashMap::new(),
+			window: HashSet::new(),
+			owed: HashSet::new(),
 		}
 	}
 
@@ -1316,5 +1492,238 @@ mod tests {
 		assert_eq!(compare((&empty, &counts(&[])), (&empty, &counts(&[("dm", 0)]))), [
 			count_difference("dm")
 		]);
+	}
+
+	type Change = fn(&mut Calm);
+
+	struct Calm {
+		conn: Connection,
+		index: RoomIndex,
+		changes: Changes,
+		room: WindowRoom,
+	}
+
+	fn calm() -> Calm {
+		let room = room("!calm:example.com", MembershipState::Join, 3);
+		let mut conn = Connection::default();
+
+		conn.lists.insert(ListId::from("all"), List {
+			room_details: ListConfig {
+				timeline_limit: uint!(1),
+				..Default::default()
+			},
+			..Default::default()
+		});
+
+		let (config_hash, _) =
+			room_config(&merged_room_details(&conn, &room.lists, &room.room_id));
+
+		conn.rooms.insert(room.room_id.clone(), Room {
+			roomsince: 5,
+			config_hash,
+			..Default::default()
+		});
+
+		let mut index = index();
+		index.window.insert(room.room_id.clone());
+
+		Calm {
+			conn,
+			index,
+			changes: Changes::default(),
+			room,
+		}
+	}
+
+	fn owes_now(calm: &Calm) -> bool { owes(&calm.conn, &calm.index, &calm.changes, &calm.room) }
+
+	fn delivered(calm: &mut Calm) -> &mut Room {
+		calm.conn
+			.rooms
+			.get_mut(&calm.room.room_id)
+			.expect("the calm room must have been delivered")
+	}
+
+	#[test]
+	fn a_room_with_nothing_new_is_owed_nothing() {
+		assert!(!owes_now(&calm()));
+	}
+
+	#[test]
+	fn a_room_is_owed_for_each_of_its_reasons_alone() {
+		let reasons: [(&str, Change); 11] = [
+			("a pass failed to collect it", |calm| {
+				calm.index.owed.insert(calm.room.room_id.clone());
+			}),
+			("the journal names it", |calm| {
+				calm.changes
+					.rooms
+					.insert(calm.room.room_id.clone());
+			}),
+			("the journal names the user's membership of it", |calm| {
+				calm.changes
+					.own_membership
+					.insert(calm.room.room_id.clone());
+			}),
+			("it entered the window", |calm| calm.index.window.clear()),
+			("it is a retraction", |calm| {
+				calm.room.membership = Some(MembershipState::Leave);
+			}),
+			("it was never delivered", |calm| delivered(calm).roomsince = 0),
+			("its payload is newer than its delivery", |calm| calm.room.payload_count = 9),
+			("its configuration was delivered otherwise", |calm| {
+				delivered(calm).config_hash += 1;
+			}),
+			("a list asks for another timeline limit", |calm| {
+				calm.conn
+					.lists
+					.get_mut(&ListId::from("all"))
+					.expect("the list must exist")
+					.room_details
+					.timeline_limit = uint!(7);
+			}),
+			("the connection subscribed to it", |calm| {
+				calm.conn
+					.subscriptions
+					.insert(calm.room.room_id.clone(), ListConfig {
+						timeline_limit: uint!(9),
+						..Default::default()
+					});
+			}),
+			("it left the list that asks for its timeline", |calm| {
+				calm.room.lists = ListIds::new();
+			}),
+		];
+
+		for (reason, change) in reasons {
+			let mut calm = calm();
+			change(&mut calm);
+
+			assert!(owes_now(&calm), "a room must be owed when {reason}");
+		}
+	}
+
+	#[test]
+	fn only_the_rooms_that_are_owed_are_collected() {
+		let quiet = calm();
+		let named = room("!named:example.com", MembershipState::Join, 3);
+		let entered = room("!entered:example.com", MembershipState::Join, 3);
+		let mut conn = quiet.conn;
+		let (config_hash, _) =
+			room_config(&merged_room_details(&conn, &named.lists, &named.room_id));
+
+		for owed_room in [&named, &entered] {
+			conn.rooms
+				.insert(owed_room.room_id.clone(), Room {
+					roomsince: 5,
+					config_hash,
+					..Default::default()
+				});
+		}
+
+		let mut index = quiet.index;
+		index.window.insert(named.room_id.clone());
+
+		let changes = written(&["!named:example.com"], &[]);
+		let window = window(&[quiet.room, named.clone(), entered.clone()]);
+
+		let found = owed(&conn, &window, &index, &changes);
+
+		assert_eq!(found, HashSet::from([named.room_id, entered.room_id]));
+	}
+
+	#[test]
+	fn a_pass_takes_off_the_rooms_it_collected_and_no_others() {
+		let [a, b, c] = ["!a:example.com", "!b:example.com", "!c:example.com"]
+			.map(|room_id| OwnedRoomId::try_from(room_id).expect("room id must parse"));
+
+		let mut conn = Connection {
+			index: Some(Box::new(RoomIndex {
+				owed: HashSet::from([a.clone(), b.clone(), c.clone()]),
+				..index()
+			})),
+			..Default::default()
+		};
+
+		pay(&mut conn, [&a, &c].into_iter());
+
+		let held = conn
+			.index
+			.as_ref()
+			.expect("the index must be kept");
+
+		assert_eq!(held.owed, HashSet::from([b]));
+
+		let mut bare = Connection::default();
+
+		pay(&mut bare, [&a].into_iter());
+
+		assert!(bare.index.is_none());
+	}
+
+	#[test]
+	fn a_pass_records_its_window_and_keeps_what_it_owed_before() {
+		let [old, kept, taken] = ["!old:example.com", "!kept:example.com", "!taken:example.com"]
+			.map(|room_id| OwnedRoomId::try_from(room_id).expect("room id must parse"));
+
+		let mut held = index();
+		held.window.insert(old.clone());
+		held.owed.insert(old.clone());
+
+		let window = window(&[
+			room("!kept:example.com", MembershipState::Join, 1),
+			room("!taken:example.com", MembershipState::Join, 2),
+		]);
+
+		record(&mut held, &window, [taken.clone()].into_iter());
+
+		assert_eq!(held.window, HashSet::from([kept, taken.clone()]));
+		assert_eq!(held.owed, HashSet::from([old, taken]));
+	}
+
+	#[test]
+	fn a_full_pass_with_something_to_send_in_a_room_the_index_left_out_is_a_range_difference() {
+		let [left_out, owed_room, silent] =
+			["!left_out:example.com", "!owed:example.com", "!silent:example.com"]
+				.map(|room_id| OwnedRoomId::try_from(room_id).expect("room id must parse"));
+
+		let clean = HashSet::from([left_out.clone(), silent]);
+		let content = [&owed_room, &left_out];
+
+		assert_eq!(unowed(&clean, content.into_iter()), [Difference {
+			part: Mismatch::Range,
+			subject: left_out.to_string(),
+		}]);
+		assert!(unowed(&clean, std::iter::empty()).is_empty());
+	}
+
+	#[test]
+	fn a_range_difference_is_set_aside_only_when_the_write_named_the_room() {
+		let range_difference = |subject: &str| Difference {
+			part: Mismatch::Range,
+			subject: subject.to_owned(),
+		};
+
+		let named = written(&["!named:example.com"], &[]);
+		let (left, explained) = settle(
+			vec![range_difference("!named:example.com"), range_difference("!other:example.com")],
+			&named,
+			|_| true,
+		);
+
+		assert_eq!(left, [range_difference("!other:example.com")]);
+		assert_eq!(explained, 1);
+	}
+
+	#[test]
+	fn only_the_rooms_of_the_dirty_set_are_asked_for() {
+		let room_id = room_id!("!asked:example.com").to_owned();
+
+		assert!(Dirty::Window.only().is_none());
+		assert!(
+			Dirty::Rooms(HashSet::from([room_id.clone()]))
+				.only()
+				.is_some_and(|rooms| rooms.contains(&room_id))
+		);
 	}
 }

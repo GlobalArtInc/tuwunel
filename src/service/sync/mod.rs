@@ -148,6 +148,14 @@ pub struct RoomIndex {
 
 	/// The rooms a pass puts in the window and the lists, with their counts.
 	pub selected: HashMap<OwnedRoomId, IndexedRoom>,
+
+	/// The rooms of the window the last pass chose, so that a room that is in the
+	/// window now and was not then is known to have entered it.
+	pub window: HashSet<OwnedRoomId>,
+
+	/// The rooms a pass owes the ranges of: the rooms it chose to collect that no
+	/// pass has yet collected. A room leaves only when a pass collects it.
+	pub owed: HashSet<OwnedRoomId>,
 }
 
 /// What a pass found out about one selected room.
@@ -173,6 +181,8 @@ impl fmt::Debug for RoomIndex {
 			.field("digest", &self.digest)
 			.field("members", &self.members.len())
 			.field("selected", &self.selected.len())
+			.field("window", &self.window.len())
+			.field("owed", &self.owed.len())
 			.finish_non_exhaustive()
 	}
 }

@@ -1,5 +1,5 @@
 use std::{
-	collections::BTreeMap,
+	collections::{BTreeMap, HashSet},
 	iter::empty,
 	mem::take,
 	sync::atomic::{AtomicUsize, Ordering},
@@ -95,6 +95,21 @@ pub(super) fn room_updates(&mut self) -> impl Iterator<Item = RoomUpdate<'_>> {
 		.map(|(room_id, range)| (room_id.as_ref(), range.config.take()))
 }
 
+/// The rooms whose ranges were collected, which are those that did not fail.
+#[implement(Results)]
+pub(super) fn collected(&self) -> impl Iterator<Item = &OwnedRoomId> { self.ranges.keys() }
+
+/// The collected rooms with a payload, receipts or account data to send.
+#[implement(Results)]
+pub(super) fn with_content(&self) -> impl Iterator<Item = &OwnedRoomId> {
+	self.ranges
+		.iter()
+		.filter(|(_, range)| {
+			range.payload.is_some() || range.receipts.is_some() || !range.account_data.is_empty()
+		})
+		.map(|(room_id, _)| room_id)
+}
+
 #[implement(Results)]
 pub(super) fn payload(&self, room_id: &RoomId) -> Option<&response::Room> {
 	self.ranges
@@ -141,12 +156,19 @@ pub(super) async fn collect(
 	sync_info: SyncInfo<'_>,
 	conn: &Connection,
 	window: &Window,
+	only: Option<&HashSet<OwnedRoomId>>,
 ) -> Results {
 	let ignored = OnceCell::new();
 	let fresh = AtomicUsize::new(0);
 	let empty_room = Room::default();
+	let wanted = |room_id: &OwnedRoomId| only.is_none_or(|only| only.contains(room_id));
+	let asked = window
+		.keys()
+		.filter(|room_id| wanted(room_id))
+		.count();
 	let ranges: BTreeMap<_, _> = window
 		.iter()
+		.filter(|(room_id, _)| wanted(room_id))
 		.stream()
 		.broad_filter_map(async |(room_id, window_room)| {
 			let room = conn.rooms.get(room_id).unwrap_or(&empty_room);
@@ -174,7 +196,7 @@ pub(super) async fn collect(
 		.await;
 
 	Results {
-		failed: window.len().saturating_sub(ranges.len()),
+		failed: asked.saturating_sub(ranges.len()),
 		fresh: fresh.into_inner(),
 		ranges,
 	}

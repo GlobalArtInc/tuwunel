@@ -54,7 +54,7 @@ use self::{
 		acknowledge_to_device, apply_profiles, apply_ranges, check_to_device,
 		handle as handle_extensions, to_device_pending,
 	},
-	index::select,
+	index::{pay, select},
 	journal::{
 		Arrival, Checked, Ended, Gated, Wait, gate, list_counts, verify_pass, verify_timeout,
 		wait_for_change,
@@ -277,7 +277,7 @@ pub(crate) async fn sync_events_v5_route(
 				.v5_pass(if woken { Pass::Woken } else { Pass::First })
 		});
 
-		let window;
+		let (window, dirty);
 		let watch_phase = registry
 			.filter(|_| wait.registers())
 			.map(|registry| registry.sync.v5_phase(V5Phase::Watch));
@@ -315,14 +315,17 @@ pub(crate) async fn sync_events_v5_route(
 		};
 
 		let select_phase = registry.map(|registry| registry.sync.v5_phase(V5Phase::Select));
-		(window, response.lists) = select(&mut conn, sync_info, !advancing).await;
+		(window, response.lists, dirty) = select(&mut conn, sync_info, !advancing).await;
 		drop(select_phase);
 		conn.last_counts = Some(list_counts(&response.lists));
 
 		let ran = conn.globalsince < conn.next_batch;
 		let answers = if ran {
-			let ranges =
-				phased(registry, V5Phase::Collect, collect_ranges(sync_info, &conn, &window));
+			let ranges = phased(
+				registry,
+				V5Phase::Collect,
+				collect_ranges(sync_info, &conn, &window, dirty.only()),
+			);
 			let extensions = phased(
 				registry,
 				V5Phase::Extensions,
@@ -330,6 +333,8 @@ pub(crate) async fn sync_events_v5_route(
 			);
 
 			let (mut ranges, extensions) = join(ranges, extensions).await;
+
+			dirty.verify(services, sender_user, &ranges, next_batch);
 
 			let mut extensions = extensions?;
 
@@ -342,13 +347,22 @@ pub(crate) async fn sync_events_v5_route(
 
 			apply_ranges(&conn, &window, &mut ranges, &mut extensions);
 			conn.update_rooms_epilogue(since, ranges.room_updates());
+			pay(&mut conn, ranges.collected());
 			conn.update_profiles_epilogue();
 			conn.ranges_owed = ranges.failed() > 0;
 
 			if let Some(registry) = registry {
+				let asked = ranges
+					.collected()
+					.count()
+					.saturating_add(ranges.failed());
+
 				registry
 					.sync
 					.v5_fresh_payloads(u64::try_from(ranges.fresh()).unwrap_or(u64::MAX));
+				registry
+					.sync
+					.v5_ranges(u64::try_from(asked).unwrap_or(u64::MAX));
 			}
 
 			response.rooms = ranges.into_payloads();

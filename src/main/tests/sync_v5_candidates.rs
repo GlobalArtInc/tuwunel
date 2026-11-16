@@ -3,15 +3,17 @@
 use std::{
 	collections::BTreeSet,
 	sync::atomic::{AtomicBool, Ordering},
+	time::Duration,
 };
 
 use futures::future::join;
 use reqwest::Method;
 use serde_json::{Value, json};
+use tokio::time::timeout;
 use tuwunel_core::{
-	Result,
+	Result, err,
 	metrics::prom::{
-		JournalKind, Mismatch, Registry, SelectPath, SelectReason, Skipped, SyncMetrics,
+		Api, JournalKind, Mismatch, Registry, SelectPath, SelectReason, Skipped, SyncMetrics,
 	},
 	ruma::{OwnedRoomId, OwnedUserId, RoomId, UserId},
 };
@@ -19,7 +21,7 @@ use tuwunel_service::Services;
 
 use self::{
 	account::account,
-	client::{Client, accepted, field},
+	client::{Client, accepted, field, poll_until},
 	fixture::boot,
 	require::require,
 };
@@ -71,6 +73,13 @@ const BURST: u32 = 20;
 const RACE_PASSES: usize = 60;
 const RACE_LIMIT: usize = 3000;
 const RACE_ROOMS: usize = 6;
+
+/// How long a long poll of a run may wait for a change, how long one that a
+/// write wakes may take to answer, and how long the harness waits for a poll to
+/// begin to wait.
+const WAKE_POLL_MS: u64 = 5_000;
+const WAKE_DEADLINE: Duration = Duration::from_secs(3);
+const GAUGE_DEADLINE: Duration = Duration::from_secs(5);
 
 /// The tag the tagged list filters by.
 const TAG: &str = "u.pick";
@@ -173,10 +182,12 @@ impl<'a> Conn<'a> {
 		Ok((Self { client, body, pos }, opening))
 	}
 
-	async fn poll(&mut self) -> Result<Value> {
+	async fn poll(&mut self) -> Result<Value> { self.poll_for(0).await }
+
+	async fn poll_for(&mut self, wait: u64) -> Result<Value> {
 		let seen = self
 			.client
-			.sliding_sync(Some(&self.pos), 0, &self.body)
+			.sliding_sync(Some(&self.pos), wait, &self.body)
 			.await?;
 
 		self.pos = field(&seen, "pos")?.to_owned();
@@ -187,6 +198,7 @@ impl<'a> Conn<'a> {
 
 struct World<'a> {
 	mode: Mode,
+	services: &'a Services,
 	registry: &'a Registry,
 	alice: Client<'a>,
 	alice_id: OwnedUserId,
@@ -205,6 +217,98 @@ impl World<'_> {
 		self.counted(&before, expected, what)?;
 
 		Ok(seen)
+	}
+
+	/// Runs one request like `pass`, and checks how many rooms of its window it
+	/// collected the ranges of: the `owed` ones when the index chose the rooms, and
+	/// all of the `window` otherwise.
+	async fn collecting(
+		&self,
+		conn: &mut Conn<'_>,
+		expected: Path,
+		what: &str,
+		(owed, window): (usize, usize),
+	) -> Result<Value> {
+		let before = self.collected()?;
+		let seen = self.pass(conn, expected, what).await?;
+
+		self.collected_since(before, what, (owed, window))?;
+
+		Ok(seen)
+	}
+
+	/// Runs one request that waits for a change, as `collecting` does, with
+	/// `write` made once it waits. The comparison with the full pass must find no
+	/// room of the window left out that has something to send.
+	async fn waking<Write>(
+		&self,
+		conn: &mut Conn<'_>,
+		what: &str,
+		counts: (usize, usize),
+		write: Write,
+	) -> Result<Value>
+	where
+		Write: Future<Output = Result>,
+	{
+		let sync = &self.registry.sync;
+		let before = snapshot(sync);
+		let collected = self.collected()?;
+		let range = sync.v5_candidates_mismatched_total(Mismatch::Range);
+
+		let polled = timeout(WAKE_DEADLINE, conn.poll_for(WAKE_POLL_MS));
+		let writing = async {
+			let waiting =
+				poll_until(GAUGE_DEADLINE, async || sync.long_polling(Api::V5) == 1).await;
+
+			require(waiting, "the long poll did not begin to wait")?;
+
+			write.await
+		};
+
+		let (polled, written) = join(polled, writing).await;
+
+		written?;
+
+		let seen =
+			polled.map_err(|_| err!("{what}: the long poll slept through the write"))??;
+
+		self.counted(&before, CANDIDATES, what)?;
+		self.collected_since(collected, what, counts)?;
+
+		require(
+			sync.v5_candidates_mismatched_total(Mismatch::Range) == range,
+			&format!(
+				"{what}: the full pass found something to send in a room the index left out"
+			),
+		)?;
+
+		Ok(seen)
+	}
+
+	fn collected_since(
+		&self,
+		before: usize,
+		what: &str,
+		(owed, window): (usize, usize),
+	) -> Result {
+		let collected = self.collected()?.saturating_sub(before);
+		let wanted = if self.mode == Mode::Candidates { owed } else { window };
+
+		require(
+			collected == wanted,
+			&format!(
+				"{what}: the pass collected the ranges of {collected} rooms instead of {wanted}"
+			),
+		)
+	}
+
+	fn collected(&self) -> Result<usize> {
+		self.registry
+			.render()
+			.lines()
+			.find_map(|line| line.strip_prefix("tuwunel_sync_v5_ranges_per_pass_sum "))
+			.and_then(|sum| sum.trim().parse().ok())
+			.ok_or_else(|| err!("the rooms collected per pass were not exposed"))
 	}
 
 	fn counted(&self, before: &[u64], expected: Path, what: &str) -> Result {
@@ -254,6 +358,7 @@ async fn exercise(services: &Services, base: &str, mode: Mode) -> Result {
 
 	let world = World {
 		mode,
+		services,
 		registry,
 		alice,
 		alice_id,
@@ -312,7 +417,10 @@ impl World<'_> {
 		self.replayed_request(&mut conn).await?;
 		self.ignored_invite(&mut conn).await?;
 		self.spaced_list().await?;
-		self.rooms_no_list_takes().await
+		self.rooms_no_list_takes().await?;
+		self.grown_window().await?;
+		self.woken_polls().await?;
+		self.failed_receipt().await
 	}
 
 	async fn messaged_rooms(&self, conn: &mut Conn<'_>) -> Result {
@@ -323,7 +431,7 @@ impl World<'_> {
 		self.message(r7, "candidates-seven").await?;
 
 		let seen = self
-			.pass(conn, CANDIDATES, "messages in three rooms")
+			.collecting(conn, CANDIDATES, "messages in three rooms", (3, 5))
 			.await?;
 
 		require(
@@ -415,7 +523,7 @@ impl World<'_> {
 		});
 
 		let seen = self
-			.pass(conn, CANDIDATES, "a room subscribed to")
+			.collecting(conn, CANDIDATES, "a room subscribed to", (1, 6))
 			.await?;
 
 		require(
@@ -427,7 +535,7 @@ impl World<'_> {
 			.message(room, "candidates-subscribed")
 			.await?;
 		let seen = self
-			.pass(conn, CANDIDATES, "a message in a subscribed room")
+			.collecting(conn, CANDIDATES, "a message in a subscribed room", (1, 5))
 			.await?;
 
 		require(
@@ -439,7 +547,7 @@ impl World<'_> {
 
 		conn.body["room_subscriptions"] = json!({});
 
-		self.pass(conn, CANDIDATES, "the subscription dropped")
+		self.collecting(conn, CANDIDATES, "the subscription dropped", (0, 5))
 			.await
 			.map(drop)
 	}
@@ -629,6 +737,331 @@ impl World<'_> {
 		)
 	}
 
+	/// A window that grows and shrinks over rooms that change outside it.
+	///
+	/// A room that enters the window is sent whole, with what the extensions
+	/// hold of it, whether it changed since it was last in the window or never was
+	/// in it.
+	async fn grown_window(&self) -> Result {
+		let body = json!({
+			"conn_id": "grown",
+			"lists": { "all": list(json!({})) },
+			"extensions": { "account_data": { "enabled": true }, "receipts": { "enabled": true } },
+		});
+
+		let before = snapshot(&self.registry.sync);
+		let (mut conn, opening) = Conn::open(&self.alice, body).await?;
+
+		self.counted(&before, (SelectPath::Full, SelectReason::NoIndex), "the opening request")?;
+
+		let first = room_keys(&opening);
+		let total = count(&opening, "all");
+		let inside = self
+			.rooms
+			.iter()
+			.filter(|room| first.contains(room.as_str()))
+			.collect::<Vec<_>>();
+
+		require(first.len() == 5 && inside.len() >= 2, "the opening window was not five rooms")?;
+
+		self.pass(&mut conn, CANDIDATES, "a pass before the window grew")
+			.await?;
+
+		let (read, tagged) = (inside[0], inside[1]);
+		let event = self
+			.bob
+			.send_text(read, "candidates-grown", "grown")
+			.await?;
+
+		self.collecting(&mut conn, CANDIDATES, "a message before a receipt", (1, 5))
+			.await?;
+
+		self.bob
+			.post(&format!("rooms/{read}/receipt/m.read/{event}"), &json!({}))
+			.await?;
+
+		let seen = self
+			.collecting(&mut conn, CANDIDATES, "a receipt in a room of the window", (1, 5))
+			.await?;
+
+		require(
+			room_keys(&seen).is_empty() && held(&seen, "receipts", read, "m.receipt"),
+			"the receipt in a room of the window was not sent",
+		)?;
+
+		self.tag(tagged, Method::PUT).await?;
+
+		let seen = self
+			.collecting(&mut conn, CANDIDATES, "a tag in a room of the window", (1, 5))
+			.await?;
+
+		require(
+			room_keys(&seen).is_empty() && held(&seen, "account_data", tagged, "m.tag"),
+			"the tag of a room of the window was not sent",
+		)?;
+
+		conn.body["lists"]["all"]["ranges"] = json!([[0, 9]]);
+
+		let seen = self
+			.collecting(&mut conn, CANDIDATES, "a window that grew", (5, 10))
+			.await?;
+
+		let entered = room_keys(&seen);
+
+		require(
+			entered.len() == 5 && entered.is_disjoint(&first) && all_initial(&seen),
+			&format!("the rooms that entered the window were not sent whole: {entered:?}"),
+		)?;
+		require(
+			count(&seen, "all") == total,
+			"the window growing changed the count of the list",
+		)?;
+
+		let outside = self
+			.rooms
+			.iter()
+			.filter(|room| !first.contains(room.as_str()) && !entered.contains(room.as_str()))
+			.filter(|room| **room != self.rooms[3])
+			.collect::<Vec<_>>();
+
+		let waiting = total
+			.saturating_sub(first.len())
+			.saturating_sub(entered.len());
+
+		require(
+			outside.len() == waiting && waiting > 0,
+			"the rooms outside the window were not rooms of the run",
+		)?;
+
+		let outer = outside[0];
+
+		self.tag(outer, Method::PUT).await?;
+
+		let seen = self
+			.collecting(&mut conn, CANDIDATES, "a tag in a room outside the window", (0, 10))
+			.await?;
+
+		require(room_keys(&seen).is_empty(), "a tag outside the window sent a room")?;
+
+		conn.body["lists"]["all"]["ranges"] = json!([[0, total.saturating_sub(1)]]);
+
+		let seen = self
+			.collecting(
+				&mut conn,
+				CANDIDATES,
+				"a window that grew over a tagged room",
+				(waiting, total),
+			)
+			.await?;
+
+		require(
+			room_keys(&seen) == keys(outside.iter().copied())
+				&& all_initial(&seen)
+				&& held(&seen, "account_data", outer, "m.tag"),
+			"a room tagged outside the window did not arrive whole with its tag",
+		)?;
+
+		conn.body["lists"]["all"]["ranges"] = json!([[0, 4]]);
+
+		self.collecting(&mut conn, CANDIDATES, "a window that shrank", (0, 5))
+			.await?;
+
+		let regrown = OwnedRoomId::try_from(
+			entered
+				.iter()
+				.next()
+				.expect("rooms entered the window")
+				.as_str(),
+		)?;
+
+		self.tag(&regrown, Method::PUT).await?;
+		self.collecting(&mut conn, CANDIDATES, "a tag in a room that left the window", (0, 5))
+			.await?;
+
+		conn.body["lists"]["all"]["ranges"] = json!([[0, 9]]);
+
+		let seen = self
+			.collecting(&mut conn, CANDIDATES, "a window that grew over a room it held", (5, 10))
+			.await?;
+
+		require(
+			room_keys(&seen).is_empty() && held(&seen, "account_data", &regrown, "m.tag"),
+			"a room that came back into the window lost what changed while it was out",
+		)?;
+
+		conn.body["lists"]["all"]["timeline_limit"] = json!(2);
+
+		let seen = self
+			.collecting(&mut conn, CANDIDATES, "a timeline limit changed", (10, 10))
+			.await?;
+
+		require(
+			room_keys(&seen).len() == 10,
+			"a room of the window did not answer a changed timeline limit",
+		)?;
+
+		for room in [tagged, outer, &regrown] {
+			self.tag(room, Method::DELETE).await?;
+		}
+
+		Ok(())
+	}
+
+	/// Long polls that a change in a quiet room of the window wakes.
+	///
+	/// The first pass of such a poll finds nothing to answer, and the pass the
+	/// change wakes must still be judged against what the index owes.
+	async fn woken_polls(&self) -> Result {
+		let body = json!({
+			"conn_id": "woken",
+			"lists": { "all": list(json!({})) },
+			"extensions": { "account_data": { "enabled": true } },
+		});
+
+		let (mut conn, opening) = Conn::open(&self.alice, body).await?;
+		let first = room_keys(&opening);
+		let room = self
+			.rooms
+			.iter()
+			.find(|room| first.contains(room.as_str()))
+			.ok_or_else(|| err!("the opening window held no room of the run"))?;
+
+		self.pass(&mut conn, CANDIDATES, "a pass before the long polls")
+			.await?;
+
+		let path = format!("user/{}/rooms/{room}/account_data/u.woken", self.alice_id);
+		let put = async {
+			self.alice
+				.put(&path, &json!({ "v": 1 }))
+				.await
+				.map(drop)
+		};
+		let seen = self
+			.waking(&mut conn, "a long poll woken by room account data", (1, 5), put)
+			.await?;
+
+		require(
+			room_keys(&seen).is_empty() && held(&seen, "account_data", room, "u.woken"),
+			"the room account data that woke a long poll was not sent",
+		)?;
+
+		let seen = self
+			.waking(&mut conn, "a long poll woken by a tag", (1, 5), self.tag(room, Method::PUT))
+			.await?;
+
+		require(
+			room_keys(&seen).is_empty() && held(&seen, "account_data", room, "m.tag"),
+			"the tag that woke a long poll was not sent",
+		)?;
+
+		self.tag(room, Method::DELETE).await
+	}
+
+	/// A room whose receipts cannot be read stays owed until a pass collects it.
+	///
+	/// Bob's receipt in a window room, and with it a row no receipt can be read
+	/// from, make the room fail when it is collected. The row goes and nothing
+	/// is written in that room, so only what the index owes brings the receipt
+	/// back. A connection that a list of a space forces onto the full pass is the
+	/// answer to match.
+	async fn failed_receipt(&self) -> Result {
+		let plain = json!({
+			"conn_id": "owing",
+			"lists": { "all": list(json!({})) },
+			"extensions": { "receipts": { "enabled": true } },
+		});
+
+		let mut spaced = plain.clone();
+		spaced["conn_id"] = json!("owing-full");
+		spaced["lists"]["spaced"] = list(json!({ "spaces": ["!nospace:example.com"] }));
+
+		let (mut cand, opening) = Conn::open(&self.alice, plain).await?;
+		let (mut full, matching) = Conn::open(&self.alice, spaced).await?;
+
+		require(strip(&opening) == strip(&matching), "the two connections opened differently")?;
+
+		let first = room_keys(&opening);
+		let inside = self
+			.rooms
+			.iter()
+			.filter(|room| first.contains(room.as_str()))
+			.collect::<Vec<_>>();
+
+		require(inside.len() >= 2, "the opening window held fewer than two rooms of the run")?;
+
+		let (failing, other) = (inside[0], inside[1]);
+		let message = self.message(failing, "candidates-owing").await?;
+
+		self.twin(&mut cand, &mut full, "a message in the room that is to fail", (1, 5))
+			.await?;
+
+		self.bob
+			.post(&format!("rooms/{failing}/receipt/m.read/{message}"), &json!({}))
+			.await?;
+
+		let permit = self.services.globals.next_count();
+		let count = *permit;
+		let key = (failing.as_str(), count, self.alice_id.as_str(), "");
+		let receipts = &self.services.db["readreceiptid_readreceipt"];
+
+		receipts.put_raw(key, br#"{"content":5}"#);
+		drop(permit);
+
+		let seen = self
+			.twin(&mut cand, &mut full, "a receipt that cannot be read", (1, 5))
+			.await?;
+
+		require(
+			!held(&seen, "receipts", failing, "m.receipt"),
+			"a room that failed to be collected sent its receipts",
+		)?;
+
+		receipts.del(key);
+		self.message(other, "candidates-owing-elsewhere")
+			.await?;
+
+		let seen = self
+			.twin(&mut cand, &mut full, "a write elsewhere once the row is gone", (2, 5))
+			.await?;
+
+		require(
+			held(&seen, "receipts", failing, "m.receipt"),
+			"the receipt of a room that failed to be collected was lost",
+		)?;
+
+		self.message(other, "candidates-owing-again")
+			.await?;
+		self.twin(&mut cand, &mut full, "a write elsewhere after the room was collected", (1, 5))
+			.await
+			.map(drop)
+	}
+
+	/// Polls the connection under test and the one the full pass answers, and
+	/// requires the same rooms and extensions from both.
+	async fn twin(
+		&self,
+		cand: &mut Conn<'_>,
+		full: &mut Conn<'_>,
+		what: &str,
+		counts: (usize, usize),
+	) -> Result<Value> {
+		let before = self.collected()?;
+		let seen = self.pass(cand, CANDIDATES, what).await?;
+		let collected = self.collected_since(before, what, counts);
+		let matching = full.poll().await?;
+
+		require(
+			strip(&seen) == strip(&matching),
+			&format!(
+				"{what}: the answer of the index differs from the full pass: {} | {}",
+				strip(&seen),
+				strip(&matching)
+			),
+		)?;
+
+		collected.map(|()| seen)
+	}
+
 	fn finish(&self) -> Result {
 		let sync = &self.registry.sync;
 
@@ -640,13 +1073,15 @@ impl World<'_> {
 		match self.mode {
 			| Mode::Candidates => require(
 				sync.v5_selected_total(SelectPath::Candidates, SelectReason::None) > 0
-					&& sync.v5_candidate_passes() > 0,
+					&& sync.v5_candidate_passes() > 0
+					&& sync.v5_range_passes() > 0,
 				"no pass took its rooms from the index",
 			),
 			| Mode::Verify => require(
 				sync.v5_candidate_passes() > 0
 					&& sync.v5_candidates_mismatched_total(Mismatch::Window) == 0
-					&& sync.v5_candidates_mismatched_total(Mismatch::Count) == 0,
+					&& sync.v5_candidates_mismatched_total(Mismatch::Count) == 0
+					&& sync.v5_candidates_mismatched_total(Mismatch::Range) == 0,
 				"the index and the full pass differed, or the index was never revised",
 			),
 			| Mode::Control => require(
@@ -672,6 +1107,7 @@ async fn exercise_horizon(services: &Services, base: &str) -> Result {
 
 	let world = World {
 		mode: Mode::Candidates,
+		services,
 		registry,
 		alice,
 		alice_id,
@@ -734,6 +1170,7 @@ async fn exercise_race(services: &Services, base: &str) -> Result {
 
 	let world = World {
 		mode: Mode::Verify,
+		services,
 		registry,
 		alice,
 		alice_id,
@@ -777,7 +1214,8 @@ async fn exercise_race(services: &Services, base: &str) -> Result {
 
 	require(
 		sync.v5_candidates_mismatched_total(Mismatch::Window) == 0
-			&& sync.v5_candidates_mismatched_total(Mismatch::Count) == 0,
+			&& sync.v5_candidates_mismatched_total(Mismatch::Count) == 0
+			&& sync.v5_candidates_mismatched_total(Mismatch::Range) == 0,
 		"a write during a pass was counted as a difference of the index",
 	)?;
 	require(
@@ -846,6 +1284,45 @@ fn moved(before: &[u64], after: &[u64]) -> Vec<Path> {
 		.filter(|(_, (before, after))| after > before)
 		.map(|(path, _)| path)
 		.collect()
+}
+
+/// Whether what an extension holds of a room mentions `needle`.
+fn held(response: &Value, extension: &str, room: &RoomId, needle: &str) -> bool {
+	response["extensions"][extension]["rooms"][room.as_str()]
+		.to_string()
+		.contains(needle)
+}
+
+/// Whether every room of the response is sent whole.
+fn all_initial(response: &Value) -> bool {
+	response["rooms"]
+		.as_object()
+		.is_some_and(|rooms| rooms.values().all(|room| room["initial"] == true))
+}
+
+/// The rooms and extensions of an answer, without the ages that tell when it was
+/// asked.
+fn strip(response: &Value) -> Value {
+	let mut stripped =
+		json!({ "rooms": response["rooms"], "extensions": response["extensions"] });
+
+	unaged(&mut stripped);
+
+	stripped
+}
+
+fn unaged(value: &mut Value) {
+	match value {
+		| Value::Object(map) => {
+			if let Some(Value::Object(unsigned)) = map.get_mut("unsigned") {
+				unsigned.remove("age");
+			}
+
+			map.values_mut().for_each(unaged);
+		},
+		| Value::Array(items) => items.iter_mut().for_each(unaged),
+		| _ => {},
+	}
 }
 
 fn room_keys(response: &Value) -> BTreeSet<String> {

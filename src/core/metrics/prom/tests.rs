@@ -721,10 +721,14 @@ fn sync_v5_requests_and_fresh_payloads_are_counted() {
 	group.v5_request(V5Path::Pass);
 	group.v5_fresh_payloads(0);
 	group.v5_fresh_payloads(7);
+	group.v5_ranges(0);
+	group.v5_ranges(3);
+	group.v5_ranges(100);
 
 	assert_eq!(group.v5_requests_total(V5Path::Quiet), 1);
 	assert_eq!(group.v5_requests_total(V5Path::Pass), 2);
 	assert_eq!(group.v5_fresh_payload_passes(), 2);
+	assert_eq!(group.v5_range_passes(), 3);
 
 	group.v5_wait_verified(WaitStage::Gate, Verdict::Quiet);
 
@@ -740,6 +744,11 @@ fn sync_v5_requests_and_fresh_payloads_are_counted() {
 		"tuwunel_sync_v5_fresh_payloads_per_pass_bucket{le=\"0\"} 1\n",
 		"tuwunel_sync_v5_fresh_payloads_per_pass_bucket{le=\"10\"} 2\n",
 		"tuwunel_sync_v5_fresh_payloads_per_pass_count 2\n",
+		"tuwunel_sync_v5_ranges_per_pass_bucket{le=\"0\"} 1\n",
+		"tuwunel_sync_v5_ranges_per_pass_bucket{le=\"5\"} 2\n",
+		"tuwunel_sync_v5_ranges_per_pass_bucket{le=\"100\"} 3\n",
+		"tuwunel_sync_v5_ranges_per_pass_sum 103\n",
+		"tuwunel_sync_v5_ranges_per_pass_count 3\n",
 		"tuwunel_sync_v5_wait_verify_total{stage=\"gate\",verdict=\"quiet\"} 1\n",
 	] {
 		assert!(text.contains(line), "{line}\n{text}");
@@ -1113,6 +1122,8 @@ fn sync_v5_selection_is_counted_by_path_and_reason() {
 	group.v5_candidates(0);
 	group.v5_candidates(3);
 	group.v5_candidates_mismatch(Mismatch::Count);
+	group.v5_candidates_mismatch(Mismatch::Range);
+	group.v5_candidates_mismatch(Mismatch::Range);
 	group.v5_candidates_skip(Skipped::Explained);
 	group.v5_candidates_skip(Skipped::Explained);
 
@@ -1124,6 +1135,7 @@ fn sync_v5_selection_is_counted_by_path_and_reason() {
 	assert_eq!(group.v5_candidate_passes(), 2);
 	assert_eq!(group.v5_candidates_mismatched_total(Mismatch::Count), 1);
 	assert_eq!(group.v5_candidates_mismatched_total(Mismatch::Window), 0);
+	assert_eq!(group.v5_candidates_mismatched_total(Mismatch::Range), 2);
 
 	let text = registry.render();
 	let parsed = parse(&text);
@@ -1137,6 +1149,7 @@ fn sync_v5_selection_is_counted_by_path_and_reason() {
 		"tuwunel_sync_v5_candidates_per_pass_count 2\n",
 		"tuwunel_sync_v5_candidates_mismatch_total{part=\"count\"} 1\n",
 		"tuwunel_sync_v5_candidates_mismatch_total{part=\"window\"} 0\n",
+		"tuwunel_sync_v5_candidates_mismatch_total{part=\"range\"} 2\n",
 		"tuwunel_sync_v5_candidates_verify_skipped_total{reason=\"explained\"} 2\n",
 		"tuwunel_sync_v5_candidates_verify_skipped_total{reason=\"journal\"} 0\n",
 	] {
