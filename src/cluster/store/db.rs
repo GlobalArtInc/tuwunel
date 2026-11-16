@@ -35,17 +35,6 @@ const FORMAT_VERSION: &[u8] = &[1];
 
 const CHUNK: usize = 16_384;
 
-/// Runs a blocking storage operation off the async workers.
-pub(super) async fn blocking<T, F>(operation: F) -> io::Result<T>
-where
-	T: Send + 'static,
-	F: FnOnce() -> io::Result<T> + Send + 'static,
-{
-	tokio::task::spawn_blocking(operation)
-		.await
-		.map_err(io::Error::other)?
-}
-
 /// The opened log database.
 ///
 /// Log entries live in the `logs` column family under their big-endian index.

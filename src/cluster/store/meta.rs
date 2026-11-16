@@ -2,7 +2,8 @@
 
 use std::{io, sync::Arc};
 
-use super::db::{Db, LEADER_MARKER, REPLACE_MARKER, blocking};
+use super::db::{Db, LEADER_MARKER, REPLACE_MARKER};
+use crate::util::blocking;
 
 /// Handle to what the log store keeps besides the log.
 ///

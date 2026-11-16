@@ -28,9 +28,9 @@ use openraft::{
 };
 use tokio::task::JoinHandle;
 
-use self::db::{Db, blocking};
+use self::db::Db;
 pub use self::meta::Meta;
-use crate::types::TypeConfig;
+use crate::{types::TypeConfig, util::blocking};
 
 /// Raft log storage over a dedicated RocksDB directory.
 ///

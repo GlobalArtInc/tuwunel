@@ -5843,6 +5843,8 @@ dependencies = [
  "rust-rocksdb",
  "serde",
  "tokio",
+ "tracing",
+ "tuwunel_core",
  "tuwunel_database",
 ]
 

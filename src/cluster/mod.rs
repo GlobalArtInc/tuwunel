@@ -10,12 +10,15 @@
 
 extern crate rust_rocksdb as rocksdb;
 
+mod machine;
 mod store;
 #[cfg(test)]
 mod tests;
 mod types;
+mod util;
 
 pub use self::{
+	machine::{Machine, Snapshots, decode_marker, encode_marker},
 	store::{LogReader, LogStore, Meta},
 	types::{Node, NodeId, Request, TypeConfig},
 };
