@@ -5,9 +5,10 @@ use regex::Regex;
 
 use super::{
 	APPSERVICE_CAP, Api, Build, BuildPath, CacheSample, Condition, Counter, DynFamily,
-	EnumFamily, Fastpath, Gauge, Histogram, JournalKind, Lookup, MAX_KEY_LEN, Metric, OTHER, Op,
-	PROVIDER_CAP, Pass, Phase, Registry, Reply, RocksSample, Scale, Section, SendResult,
-	SinceKind, V5Phase, Verdict, WaitStage, WakeReason, WatchPart, Writer,
+	EnumFamily, Fastpath, Gauge, Histogram, JournalKind, Lookup, MAX_KEY_LEN, Metric, NODE_CAP,
+	NodeState, OTHER, Op, PROVIDER_CAP, Pass, Phase, Registry, Rejection, Reply, RocksSample,
+	Scale, Section, SendResult, SinceKind, V5Phase, Verdict, WaitStage, WakeReason, WatchPart,
+	Writer,
 };
 use crate::label_set;
 
@@ -49,6 +50,7 @@ const ALLOWED_LABELS: &[&str] = &[
 	"version",
 	"le",
 	"family",
+	"node",
 ];
 
 struct Probe {
@@ -1053,5 +1055,73 @@ fn sync_v3_build_paths_and_candidates_are_counted() {
 		assert!(text.contains(line), "{line}\n{text}");
 	}
 
+	assert!(parsed.samples <= registry.max_series());
+}
+
+#[test]
+fn cluster_metrics_stay_hidden_until_enabled_and_follower_lag_is_capped() {
+	let registry = Registry::new();
+
+	assert!(!registry.render().contains("tuwunel_cluster_"));
+	assert!(!registry.cluster.is_enabled());
+
+	let group = &registry.cluster;
+	group.enable();
+	group.set_state(NodeState::Leader);
+	group.set_term(7);
+	group.set_commit_index(11);
+	group.set_apply_index(10);
+	group.observe_barrier(Duration::from_millis(3));
+	group.barrier_timeout();
+	group.leader_changed();
+	group.reflect();
+	group.reject(Rejection::Identity);
+	group.set_queue_bytes(4096);
+	group.set_quorum_ack_age(-1);
+	group.follower_lag("1").set(4);
+
+	for index in 0..NODE_CAP.saturating_add(3) {
+		group.follower_lag(&format!("n{index}")).set(1);
+	}
+
+	assert_eq!(group.state_value(), NodeState::Leader.value());
+	assert_eq!(group.barrier_waits(), 1);
+	assert_eq!(group.barrier_timeouts(), 1);
+	assert_eq!(group.rejections(Rejection::Identity), 1);
+	assert_eq!(group.rejections(Rejection::Unauthorized), 0);
+
+	let text = registry.render();
+	let parsed = parse(&text);
+
+	for line in [
+		"tuwunel_cluster_role 3\n",
+		"tuwunel_cluster_term 7\n",
+		"tuwunel_cluster_commit_index 11\n",
+		"tuwunel_cluster_apply_index 10\n",
+		"tuwunel_cluster_barrier_seconds_bucket{le=\"0.005\"} 1\n",
+		"tuwunel_cluster_barrier_seconds_bucket{le=\"0.0025\"} 0\n",
+		"tuwunel_cluster_barrier_timeouts_total 1\n",
+		"tuwunel_cluster_follower_lag_entries{node=\"1\"} 4\n",
+		"tuwunel_cluster_follower_lag_entries{node=\"_other\"} 1\n",
+		"tuwunel_cluster_capture_queue_bytes 4096\n",
+		"tuwunel_cluster_leader_changes_total 1\n",
+		"tuwunel_cluster_quorum_ack_age_milliseconds -1\n",
+		"tuwunel_cluster_reflected_requests_total 1\n",
+		"tuwunel_cluster_rpc_rejected_total{reason=\"identity\"} 1\n",
+		"tuwunel_cluster_rpc_rejected_total{reason=\"unauthorized\"} 0\n",
+		"tuwunel_metrics_series_overflow_total{family=\"tuwunel_cluster_follower_lag_entries\"} \
+		 4\n",
+	] {
+		assert!(text.contains(line), "{line}\n{text}");
+	}
+
+	assert!(
+		parsed
+			.label_names
+			.iter()
+			.all(|name| ALLOWED_LABELS.contains(&name.as_str())),
+		"label names outside the allowlist: {:?}",
+		parsed.label_names
+	);
 	assert!(parsed.samples <= registry.max_series());
 }

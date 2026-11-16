@@ -24,12 +24,12 @@ type Current = Arc<Mutex<Option<SnapshotOf<TypeConfig, Vec<u8>>>>>;
 /// The smallest state machine the storage conformance suite accepts. It keeps
 /// the applied position and the membership and nothing else.
 #[derive(Default)]
-pub(super) struct Machine {
+pub(crate) struct Machine {
 	state: State,
 	current: Current,
 }
 
-pub(super) struct Snapshots {
+pub(crate) struct Snapshots {
 	state: State,
 	current: Current,
 }

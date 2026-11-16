@@ -1,4 +1,4 @@
-mod machine;
+pub(crate) mod machine;
 
 use std::{
 	collections::BTreeMap,
@@ -9,7 +9,7 @@ use std::{
 	path::{Path, PathBuf},
 	process::id,
 	sync::atomic::{AtomicU64, Ordering},
-	time::Duration,
+	time::{Duration, Instant},
 };
 
 use openraft::{
@@ -28,22 +28,22 @@ use tokio::time::{sleep, timeout};
 use tuwunel_database::Entry;
 
 use self::machine::Machine;
-use crate::{LogStore, Node, Request, TypeConfig};
+use crate::{LogStore, MAX_SYNC_DELAY, Node, Request, TypeConfig};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 type Acknowledgement = OneshotReceiverOf<TypeConfig, io::Result<()>>;
 
-struct TempDir(PathBuf);
+pub(crate) struct TempDir(PathBuf);
 
 impl TempDir {
-	fn new() -> Self {
+	pub(crate) fn new() -> Self {
 		let name = format!("tuwunel-cluster-{}-{}", id(), NEXT.fetch_add(1, Ordering::Relaxed));
 
 		Self(temp_dir().join(name))
 	}
 
-	fn path(&self) -> &Path { &self.0 }
+	pub(crate) fn path(&self) -> &Path { &self.0 }
 }
 
 impl Drop for TempDir {
@@ -156,6 +156,85 @@ async fn log_storage_conformance_suite() {
 	Suite::<TypeConfig, LogStore, Machine, Builder, TempDir>::test_all(Builder)
 		.await
 		.expect("the log store passes the storage conformance suite");
+}
+
+#[tokio::test]
+async fn a_store_serves_only_the_node_it_was_first_bound_to() {
+	let dir = TempDir::new();
+	let store = open(&dir).await;
+	let meta = store.meta();
+
+	assert_eq!(meta.node_id().await.expect("read"), None, "a fresh store belongs to no node");
+
+	meta.bind_node(3)
+		.await
+		.expect("the first binding is recorded");
+	meta.bind_node(3)
+		.await
+		.expect("the same node binds again");
+
+	let error = meta
+		.bind_node(4)
+		.await
+		.expect_err("another node is refused");
+
+	assert_eq!(error.kind(), ErrorKind::InvalidData, "the refusal is a data error: {error}");
+
+	drop((meta, store));
+
+	let reopened = open(&dir).await.meta();
+
+	assert_eq!(reopened.node_id().await.expect("read"), Some(3), "the binding is durable");
+	assert!(reopened.bind_node(4).await.is_err(), "and still holds after a restart");
+}
+
+#[tokio::test]
+async fn a_sync_delay_holds_back_the_sync_of_appended_entries() {
+	let dir = TempDir::new();
+	let mut store = open(&dir).await;
+	let delay = store.sync_delay();
+	let held = Duration::from_millis(200);
+
+	let started = Instant::now();
+	append(&mut store, [blank(1, 0)]).await;
+	let plain = started.elapsed();
+
+	delay.set(held);
+
+	let started = Instant::now();
+	append(&mut store, [blank(1, 1)]).await;
+	let delayed = started.elapsed();
+
+	assert!(delayed >= held, "the sync waits out the delay");
+	assert!(delayed > plain, "and takes longer than it did without");
+
+	delay.set(Duration::from_hours(1));
+	assert_eq!(delay.get(), MAX_SYNC_DELAY, "the delay is capped");
+
+	delay.set(Duration::ZERO);
+
+	let started = Instant::now();
+	append(&mut store, [blank(1, 2)]).await;
+	let restored = started.elapsed();
+
+	assert!(restored < delayed, "removing the delay brings the speed back");
+}
+
+#[test]
+fn node_records_keep_their_stored_format() {
+	let node = Node {
+		addr: "http://a:1".to_owned(),
+		incarnation: 7,
+	};
+	let mut expected = vec![10];
+	expected.extend_from_slice(b"http://a:1");
+	expected.push(7);
+
+	assert_eq!(
+		postcard::to_allocvec(&node).expect("encodes"),
+		expected,
+		"a change of Node breaks the logs on disk: raise the log store format version"
+	);
 }
 
 #[tokio::test]

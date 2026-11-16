@@ -9,6 +9,7 @@
 //! membership, and the group is formed only by an explicit request to Raft.
 
 mod db;
+mod delay;
 mod meta;
 #[cfg(test)]
 pub(crate) mod probe;
@@ -29,7 +30,10 @@ use openraft::{
 use tokio::task::JoinHandle;
 
 use self::db::Db;
-pub use self::meta::Meta;
+pub use self::{
+	delay::{MAX_SYNC_DELAY, SyncDelay},
+	meta::Meta,
+};
 use crate::{types::TypeConfig, util::blocking};
 
 /// Raft log storage over a dedicated RocksDB directory.
@@ -66,6 +70,11 @@ impl LogStore {
 	/// A handle to the identity and the markers kept beside the log.
 	#[must_use]
 	pub fn meta(&self) -> Meta { Meta::new(Arc::clone(&self.db)) }
+
+	/// A handle to the delay of the disk syncs of this store. It starts at
+	/// zero, and nothing sets it unless a rehearsal of a slow disk does.
+	#[must_use]
+	pub fn sync_delay(&self) -> SyncDelay { self.db.delay() }
 
 	#[cfg(test)]
 	pub(crate) fn probe(&self) -> Arc<probe::Probe> { self.db.probe() }

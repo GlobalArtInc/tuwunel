@@ -26,6 +26,25 @@ impl Meta {
 	#[must_use]
 	pub fn incarnation(&self) -> u128 { self.db.incarnation() }
 
+	/// The node this store was bound to, or none while it is not bound.
+	pub async fn node_id(&self) -> io::Result<Option<u64>> {
+		let db = Arc::clone(&self.db);
+
+		blocking(move || db.node()).await
+	}
+
+	/// Binds the store to a node, or checks that it is bound to that node.
+	///
+	/// The first call records `node` in the store, synced to disk. Later calls
+	/// succeed only for the same node: a volume that held node 0 and is
+	/// mounted for node 1 is refused instead of acting as node 1 with the
+	/// incarnation of node 0. Call it before the store is handed to Raft.
+	pub async fn bind_node(&self, node: u64) -> io::Result<()> {
+		let db = Arc::clone(&self.db);
+
+		blocking(move || db.bind_node(node)).await
+	}
+
 	/// The leader marker, or none when it is not set.
 	pub async fn leader_marker(&self) -> io::Result<Option<Vec<u8>>> {
 		self.get(LEADER_MARKER).await

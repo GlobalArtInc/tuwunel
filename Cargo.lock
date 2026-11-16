@@ -5836,12 +5836,16 @@ dependencies = [
 name = "tuwunel_cluster"
 version = "2.0.0"
 dependencies = [
+ "aws-lc-rs",
+ "axum",
  "futures",
  "openraft",
  "postcard",
  "rand 0.10.3",
+ "reqwest",
  "rust-rocksdb",
  "serde",
+ "serde_json",
  "tokio",
  "tracing",
  "tuwunel_core",
