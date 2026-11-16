@@ -132,6 +132,7 @@ pub fn check(config: &Config) -> Result {
 
 	check_observability(config)?;
 	check_metrics(config)?;
+	check_cluster(config)?;
 	check_network(config)?;
 	check_storage(config)?;
 	check_registration(config)?;
@@ -256,6 +257,109 @@ fn check_metrics(config: &Config) -> Result {
 			 anyone who can connect to it can read the server metrics. Set \
 			 metrics.bearer_token or metrics.bearer_token_file, or restrict access to the port."
 		);
+	}
+
+	Ok(())
+}
+
+fn check_cluster(config: &Config) -> Result {
+	macro_rules! at_least_one {
+		($key:literal, $value:expr) => {
+			if $value == 0 {
+				return Err!(Config($key, "must be at least 1"));
+			}
+		};
+	}
+
+	let cluster = &config.cluster;
+
+	if !cluster.enable {
+		return Ok(());
+	}
+
+	cluster.check_node_identity()?;
+
+	let advertise = cluster.advertise.as_deref().ok_or_else(|| {
+		err!(Config("cluster.advertise", "must be set when the cluster is enabled"))
+	})?;
+
+	let advertise = Url::parse(advertise)
+		.map_err(|e| err!(Config("cluster.advertise", "is not a valid URL: {e}")))?;
+
+	if !matches!(advertise.scheme(), "http" | "https") || advertise.host().is_none() {
+		return Err!(Config(
+			"cluster.advertise",
+			"must be an http or https URL that names a host"
+		));
+	}
+
+	let secret_file = cluster.secret_file.as_ref().ok_or_else(|| {
+		err!(Config("cluster.secret_file", "must be set when the cluster is enabled"))
+	})?;
+
+	let secret = read_to_string(secret_file).map_err(|e| {
+		err!(Config("cluster.secret_file", "Failed to read the cluster secret file: {e}"))
+	})?;
+
+	if secret.trim().is_empty() {
+		return Err!(Config("cluster.secret_file", "Cluster secret file is empty"));
+	}
+
+	if cluster
+		.raft_path
+		.as_ref()
+		.is_none_or(|path| path.as_os_str().is_empty())
+	{
+		return Err!(Config("cluster.raft_path", "must be set when the cluster is enabled"));
+	}
+
+	if cluster
+		.snapshot_path
+		.as_ref()
+		.is_none_or(|path| path.as_os_str().is_empty())
+	{
+		return Err!(Config("cluster.snapshot_path", "must be set when the cluster is enabled"));
+	}
+
+	at_least_one!("cluster.heartbeat_ms", cluster.heartbeat_ms);
+	at_least_one!("cluster.lease_ms", cluster.lease_ms);
+	at_least_one!("cluster.commit_timeout_ms", cluster.commit_timeout_ms);
+	at_least_one!("cluster.snapshot_log_bytes", cluster.snapshot_log_bytes);
+	at_least_one!("cluster.keep_log_bytes", cluster.keep_log_bytes);
+	at_least_one!("cluster.snapshot_rate_mb", cluster.snapshot_rate_mb);
+	at_least_one!("cluster.capture_queue_bytes", cluster.capture_queue_bytes);
+
+	let (min, max) = (cluster.election_timeout_ms.min, cluster.election_timeout_ms.max);
+	if min >= max {
+		return Err!(Config(
+			"cluster.election_timeout_ms",
+			"the lower bound {min} must be below the upper bound {max}"
+		));
+	}
+
+	if min < cluster.heartbeat_ms.saturating_mul(3) {
+		return Err!(Config(
+			"cluster.election_timeout_ms",
+			"the lower bound {min} must be at least three times cluster.heartbeat_ms ({})",
+			cluster.heartbeat_ms
+		));
+	}
+
+	if cluster.lease_ms >= min {
+		return Err!(Config(
+			"cluster.lease_ms",
+			"must be below the lower bound of cluster.election_timeout_ms ({min}), or a leader \
+			 still counts as confirmed when another node may already have taken over"
+		));
+	}
+
+	if cluster.lease_ms <= cluster.heartbeat_ms {
+		return Err!(Config(
+			"cluster.lease_ms",
+			"must be above cluster.heartbeat_ms ({}), or the lease runs out between two \
+			 heartbeats",
+			cluster.heartbeat_ms
+		));
 	}
 
 	Ok(())

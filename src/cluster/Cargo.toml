@@ -1,0 +1,37 @@
+[package]
+name = "tuwunel_cluster"
+categories.workspace = true
+description.workspace = true
+edition.workspace = true
+keywords.workspace = true
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[lib]
+path = "mod.rs"
+bench = false
+crate-type = [
+	"rlib",
+]
+
+[features]
+default = [
+	"tuwunel-database/default",
+]
+
+[dependencies]
+openraft.workspace = true
+postcard.workspace = true
+rand.workspace = true
+rust-rocksdb.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tuwunel-database.workspace = true
+
+[dev-dependencies]
+futures.workspace = true
+
+[lints]
+workspace = true

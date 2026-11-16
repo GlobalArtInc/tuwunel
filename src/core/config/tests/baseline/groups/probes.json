@@ -108,6 +108,15 @@
     "runtime_path": "client.sync.runtime_extra"
   },
   {
+    "section": "global.cluster",
+    "field": "cluster.enable",
+    "empty": "[global]\n[global.cluster]\n",
+    "partial": "[global]\n[global.cluster]\nenable = true\n",
+    "unknown_input": "[global.cluster]\nfuture_setting = [\"retained\"]\nruntime_extra = true\n",
+    "unknown_path": "cluster.future_setting",
+    "runtime_path": "cluster.runtime_extra"
+  },
+  {
     "section": "global.compatibility",
     "field": "hydra_backports",
     "empty": "[global]\n[global.compatibility]\n",

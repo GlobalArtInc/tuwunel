@@ -40,6 +40,7 @@ pub mod registration;
 pub mod admin;
 pub mod appservice_client;
 pub mod client;
+pub mod cluster;
 pub mod compatibility;
 pub mod configuration;
 pub mod logging;
@@ -87,6 +88,7 @@ pub use self::{
 	cache::Cache,
 	check::check,
 	client::Client,
+	cluster::Cluster,
 	compatibility::Compatibility,
 	configuration::Configuration,
 	database::Database,
@@ -205,9 +207,9 @@ pub type ProviderSection<'a> = (&'a str, Cow<'a, StorageProvider>);
 	ignore = "rocksdb catchall well_known tls rate_limiting ldap jwt appservice \
 	          identity_provider storage_provider registration_terms smtp cache database runtime \
 	          http network media federation rooms sending authentication directory encryption \
-	          profile registration admin appservice_client client compatibility configuration \
-	          logging metrics presence push read_receipts rendezvous telemetry tracing turn \
-	          typing",
+	          profile registration admin appservice_client client cluster compatibility \
+	          configuration logging metrics presence push read_receipts rendezvous telemetry \
+	          tracing turn typing",
 	forbidden = "database_restore_backup force_migration"
 )]
 pub struct Config {
@@ -540,6 +542,12 @@ pub struct Config {
 	/// display: section
 	#[serde(default)]
 	pub client: Client,
+
+	/// Settings for the cluster.
+	///
+	/// display: section
+	#[serde(default)]
+	pub cluster: Cluster,
 
 	/// Settings for compatibility.
 	///

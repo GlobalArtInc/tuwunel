@@ -1,6 +1,7 @@
 #![cfg(test)]
 
 mod baseline;
+mod cluster;
 mod hierarchy;
 
 use std::{
@@ -1954,7 +1955,7 @@ fn jwt_key_conversions_refuse_an_empty_key() {
 /// "varies by system" and non-literal bodies are out of reach here.
 #[test]
 fn documented_defaults_match_the_code() {
-	const SOURCES: [&str; 31] = [
+	const SOURCES: [&str; 32] = [
 		include_str!("mod.rs"),
 		include_str!("rocksdb.rs"),
 		include_str!("cache.rs"),
@@ -1974,6 +1975,7 @@ fn documented_defaults_match_the_code() {
 		include_str!("admin.rs"),
 		include_str!("appservice_client.rs"),
 		include_str!("client.rs"),
+		include_str!("cluster.rs"),
 		include_str!("compatibility.rs"),
 		include_str!("configuration.rs"),
 		include_str!("logging.rs"),

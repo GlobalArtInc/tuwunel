@@ -332,6 +332,14 @@ features = [
 	"fs",
 ]
 
+[workspace.dependencies.openraft]
+version = "=0.10.0"
+default-features = false
+features = [
+	"serde",
+	"tokio-rt",
+]
+
 [workspace.dependencies.opentelemetry]
 version = "0.33"
 
@@ -348,6 +356,11 @@ version = "0.33"
 
 [workspace.dependencies.pin-project-lite]
 version = "0.2"
+
+[workspace.dependencies.postcard]
+version = "1.1"
+default-features = false
+features = ["use-std"]
 
 [workspace.dependencies.proc-macro2]
 version = "1.0"
@@ -745,6 +758,11 @@ default-features = false
 [workspace.dependencies.tuwunel-service]
 package = "tuwunel_service"
 path = "src/service"
+default-features = false
+
+[workspace.dependencies.tuwunel-cluster]
+package = "tuwunel_cluster"
+path = "src/cluster"
 default-features = false
 
 [workspace.dependencies.tuwunel-database]

@@ -1413,6 +1413,173 @@
 
 
 ################################################################################
+# Cluster replication
+#
+# Runs this server as one node of a cluster that replicates its database
+# through a Raft quorum, so that a write confirmed to a client survives the
+# loss of any one node. It is off by default, and while it is off the other
+# keys in this section are neither used nor checked. Every setting is read
+# once at startup; restart the server after changing one.
+#
+# Tips:
+# - Startup refuses `enable` without a node identity (`node_id` or
+#   `node_id_from_hostname`, not both), `advertise`, `secret_file`,
+#   `raft_path` and `snapshot_path`.
+# - The cluster listener is separate from `http.listen`. Do not publish it
+#   through a reverse proxy; only the other nodes and the health probes need
+#   to reach it.
+# - A node never forms a cluster on its own. An empty `raft_path` yields an
+#   empty log, and only `initialize` turns it into a one-node cluster.
+#
+#[global.cluster]
+
+# Turns on cluster mode.
+#
+# While off, the server runs on its own and the rest of this section is
+# ignored.
+#
+#enable = false
+
+# Sets the numeric identity of this node in the cluster.
+#
+# It must differ between the nodes and stay the same for the life of the
+# node. Set this or `node_id_from_hostname`, not both.
+#
+# example: 0
+#
+#node_id =
+
+# Takes the identity of this node from the number at the end of the host
+# name.
+#
+# This is the ordinal a StatefulSet gives its pods: `tuwunel-2` becomes
+# node 2. A host name that does not end in a dash and digits fails the
+# startup. It cannot be combined with `node_id`.
+#
+#node_id_from_hostname = false
+
+# Sets the address of the cluster listener.
+#
+# It carries the traffic between the nodes and the health endpoints, on a
+# port of its own.
+#
+#listen = "0.0.0.0:8009"
+
+# Sets the base URL the other nodes reach this node at.
+#
+# The URL is shared with the cluster as part of its membership. It must
+# use `http` or `https` and name a host.
+#
+# example: "http://tuwunel-0.tuwunel-peers.default.svc:8009"
+#
+#advertise =
+
+# Reads the shared secret that authenticates cluster traffic from this
+# file.
+#
+# Every node must hold the same secret. Surrounding whitespace is ignored.
+# With the cluster enabled, startup refuses a file that cannot be read or
+# is empty.
+#
+# example: "/etc/tuwunel/cluster-secret"
+#
+#secret_file =
+
+# Sets the directory of the Raft log.
+#
+# Votes and log entries are synced to disk before they count, so keep it
+# on storage that survives restarts of the node. It must not be the
+# database directory.
+#
+# example: "/var/lib/tuwunel/raft"
+#
+#raft_path =
+
+# Sets the directory the snapshots of the database are kept in and
+# received snapshots are staged in.
+#
+# Leave room for about two copies of the database.
+#
+# example: "/var/lib/tuwunel/snapshots"
+#
+#snapshot_path =
+
+# Forms a new cluster of this node alone when it starts with an empty
+# Raft log.
+#
+# Set it on one node, for the first start only; the other nodes are added
+# to the cluster afterwards. It does nothing once a log exists.
+#
+#initialize = false
+
+# Sets how often a leader contacts each follower to keep its leadership,
+# in milliseconds.
+#
+#heartbeat_ms = 250
+
+# Sets the range, in milliseconds, a follower draws the time it waits for
+# its leader from before it stands for election.
+#
+# Two numbers, the lower bound first. The lower bound must be below the
+# upper one and at least three times `heartbeat_ms`.
+#
+#election_timeout_ms = [1500, 3000]
+
+# Sets how long, in milliseconds, a leader counts as confirmed by a
+# majority after it last heard from one.
+#
+# It must be above `heartbeat_ms` and below the lower bound of
+# `election_timeout_ms`.
+#
+#lease_ms = 1000
+
+# Sets how long, in milliseconds, a reply waits for the writes behind it
+# to be confirmed by a majority.
+#
+# A request that times out fails with an error that leaves the outcome of
+# its writes unknown.
+#
+#commit_timeout_ms = 10000
+
+# Sets how much new Raft log makes the node take a snapshot of the
+# database.
+#
+# Accepts an integer byte count or a string with an SI/IEC suffix such as
+# "256 MiB".
+#
+#snapshot_log_bytes = "256 MiB"
+
+# Sets how much of the Raft log is kept, so that a follower that fell
+# behind catches up from the log instead of from a snapshot.
+#
+# Accepts an integer byte count or a string with an SI/IEC suffix such as
+# "1 GiB".
+#
+#keep_log_bytes = "1 GiB"
+
+# Limits the speed a snapshot is sent to another node at, in megabytes
+# per second.
+#
+#snapshot_rate_mb = 50
+
+# Limits the writes a leader holds back while they wait to be replicated.
+#
+# A leader whose queue outgrows the limit gives up leadership.
+# Accepts an integer byte count or a string with an SI/IEC suffix such as
+# "256 MiB".
+#
+#capture_queue_bytes = "256 MiB"
+
+# Allows requests that inject faults into the cluster traffic: lost or
+# delayed messages to a node and delayed disk syncs.
+#
+# For rehearsals of failures only. Never enable it on a server that
+# serves users.
+#
+#allow_faults = false
+
+
+################################################################################
 # Room-version compatibility
 #
 # Carries protections from newer room versions back to rooms on older
