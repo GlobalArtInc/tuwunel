@@ -490,6 +490,38 @@ async fn journal_relevant_answers_as_the_wait_does() -> Result {
 	.await
 }
 
+#[tokio::test]
+async fn journal_relevant_upto_leaves_out_a_change_above_its_bound() -> Result {
+	with_services(async |services| {
+		let after = services.globals.wait_pending().await?;
+
+		journal_user(services, bob(), Some(phone()));
+		journal_user(services, alice(), Some(phone()));
+
+		let own = services.globals.current_count();
+		let relevant = async |upto| {
+			services
+				.sync
+				.journal_relevant_upto(alice(), Some(phone()), after, upto)
+				.await
+		};
+
+		assert!(own > after.saturating_add(1));
+		assert_eq!(relevant(own.saturating_sub(1)).await, Some(false));
+		assert_eq!(relevant(own).await, Some(true));
+		assert_eq!(
+			services
+				.sync
+				.journal_relevant(alice(), Some(phone()), after)
+				.await,
+			Some(true)
+		);
+
+		Ok(())
+	})
+	.await
+}
+
 async fn agree(services: &Services, device: Option<&DeviceId>, after: u64, relevant: bool) {
 	assert_eq!(
 		services

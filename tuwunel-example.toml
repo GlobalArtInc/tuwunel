@@ -1313,6 +1313,26 @@
 #
 #journal_wait_verify = false
 
+# A sliding sync long poll waits for changes through the change journal
+# instead of registering database watchers, which cuts the cost of every
+# pass for accounts with many rooms. Needs `journal_capacity` above 0.
+# Run `v5_journal_wait_verify` first and check that
+# `tuwunel_sync_v5_wait_verify_total{verdict="miss"}` stays at 0.
+# `v5_journal_wait_verify` takes precedence.
+#
+# reloadable: yes
+#
+#v5_journal_wait = false
+
+# The sliding sync long poll still waits on database watchers, and the
+# journal is asked afterwards whether it would have woken the poll. The
+# verdicts are counted in `tuwunel_sync_v5_wait_verify_total`, by `stage`
+# and `verdict`. Needs `journal_capacity` above 0.
+#
+# reloadable: yes
+#
+#v5_journal_wait_verify = false
+
 # Joined-room count from which a legacy sync that has only presence to
 # report keeps waiting instead of answering.
 #

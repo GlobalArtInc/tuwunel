@@ -171,6 +171,26 @@ pub struct Sync {
 	#[serde(default)]
 	pub journal_wait_verify: bool,
 
+	/// A sliding sync long poll waits for changes through the change journal
+	/// instead of registering database watchers, which cuts the cost of every
+	/// pass for accounts with many rooms. Needs `journal_capacity` above 0.
+	/// Run `v5_journal_wait_verify` first and check that
+	/// `tuwunel_sync_v5_wait_verify_total{verdict="miss"}` stays at 0.
+	/// `v5_journal_wait_verify` takes precedence.
+	///
+	/// reloadable: yes
+	#[serde(default)]
+	pub v5_journal_wait: bool,
+
+	/// The sliding sync long poll still waits on database watchers, and the
+	/// journal is asked afterwards whether it would have woken the poll. The
+	/// verdicts are counted in `tuwunel_sync_v5_wait_verify_total`, by `stage`
+	/// and `verdict`. Needs `journal_capacity` above 0.
+	///
+	/// reloadable: yes
+	#[serde(default)]
+	pub v5_journal_wait_verify: bool,
+
 	/// Joined-room count from which a legacy sync that has only presence to
 	/// report keeps waiting instead of answering.
 	///
@@ -269,6 +289,8 @@ impl Default for Sync {
 			candidates_verify: false,
 			journal_wait: false,
 			journal_wait_verify: false,
+			v5_journal_wait: false,
+			v5_journal_wait_verify: false,
 			presence_only_min_rooms: 0,
 			journal_capacity: default_journal_capacity(),
 			initial_large_account_rooms: default_initial_large_account_rooms(),

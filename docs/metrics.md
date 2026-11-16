@@ -117,6 +117,8 @@ shares the `_other` series.
 | `tuwunel_sync_v3_wait_lookups_total` | counter | `how` |
 | `tuwunel_sync_v3_wait_verify_total` | counter | `verdict` |
 | `tuwunel_sync_v3_wait_wakes_total` | counter | `reason` |
+| `tuwunel_sync_v5_wait_verify_total` | counter | `stage`, `verdict` |
+| `tuwunel_sync_v5_wait_wakes_total` | counter | `reason` |
 | `tuwunel_sync_v5_pass_seconds` | histogram | `pass` |
 | `tuwunel_sync_v5_phase_seconds` | histogram | `phase` |
 | `tuwunel_sync_v5_response_rooms` | histogram | none |
@@ -215,6 +217,22 @@ have let a long poll sleep through a change. It is counted only while
 longer covers the position the wait began from. `tuwunel_sync_v3_wait_wakes_total` counts why
 a long poll that waits through the journal ended, by `reason`, and is counted only while
 `journal_wait` is on and `journal_wait_verify` is off.
+
+A sliding sync pass registers the same database watchers as a legacy sync build, and
+`tuwunel_sync_v3_watch_seconds` and `tuwunel_sync_v3_watchers_per_sync` count them
+whichever API registered them. With `v5_journal_wait` on, a sliding sync request registers
+none, waits through the journal as above, and adds nothing to those two metrics, nor to
+the `watch` phase of `tuwunel_sync_v5_phase_seconds`.
+`tuwunel_sync_v5_wait_wakes_total` counts why such a wait ended, by `reason` as for the
+legacy sync, and is counted only while `v5_journal_wait` is on and `v5_journal_wait_verify`
+is off; a request whose client went away during the wait is not counted.
+`tuwunel_sync_v5_wait_verify_total` counts the verdicts of the shadow comparison of the
+journal with the database watchers, by `stage` and `verdict` as for the legacy sync, and is
+counted only while `v5_journal_wait_verify` is on. `stage` is `woken` for the pass that
+followed a wake of the watchers, compared over the positions that pass read, and `timeout`
+for a long poll that ran out of time. A key count or fallback key type alone is not data
+for the `woken` verdict. A comparison with no verdict is skipped when the journal no longer
+covers the position the wait began from.
 
 ### Database
 

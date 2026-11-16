@@ -115,6 +115,25 @@ pub async fn journal_relevant(
 	after: u64,
 ) -> Option<bool> {
 	let upto = self.services.globals.current_count();
+
+	self.journal_relevant_upto(user, device, after, upto)
+		.await
+}
+
+/// Returns whether the journal holds a change in `(after, upto]` that concerns
+/// the user on `device`, or `None` when the journal no longer covers `after`.
+///
+/// It is [`Self::journal_relevant`] with the upper end of the window given, for
+/// a caller whose own read stopped at `upto`: a change numbered above it is one
+/// the read could not have seen, so it does not count.
+#[implement(super::Service)]
+pub async fn journal_relevant_upto(
+	&self,
+	user: &UserId,
+	device: Option<&DeviceId>,
+	after: u64,
+	upto: u64,
+) -> Option<bool> {
 	let mut memo = RoomMemo::default();
 
 	loop {

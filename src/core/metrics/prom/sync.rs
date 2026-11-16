@@ -239,6 +239,17 @@ label_set! {
 }
 
 label_set! {
+	/// The point of a sliding sync request at which the shadow comparison of a
+	/// wait on the sync journal was made.
+	pub enum WaitStage("stage") {
+		/// After the pass that followed a wake of the database watchers.
+		Woken => "woken",
+		/// After the wait ran out of time.
+		Timeout => "timeout",
+	}
+}
+
+label_set! {
 	/// Why a long poll that waits through the sync journal ended.
 	pub enum WakeReason("reason") {
 		/// A change in the journal woke the poll.
@@ -277,6 +288,8 @@ pub struct SyncMetrics {
 	wait_verify: EnumFamily<Verdict, Counter>,
 	wait_wakes: EnumFamily<WakeReason, Counter>,
 	long_polls: EnumFamily<Api, Gauge>,
+	v5_wait_verify: EnumFamily<(WaitStage, Verdict), Counter>,
+	v5_wait_wakes: EnumFamily<WakeReason, Counter>,
 	v5_pass: EnumFamily<Pass, Histogram<15>>,
 	v5_phase: EnumFamily<V5Phase, Histogram<15>>,
 	v5_connections_loaded: Gauge,
@@ -322,6 +335,8 @@ impl SyncMetrics {
 			wait_verify: EnumFamily::new(Counter::new),
 			wait_wakes: EnumFamily::new(Counter::new),
 			long_polls: EnumFamily::new(Gauge::new),
+			v5_wait_verify: EnumFamily::new(Counter::new),
+			v5_wait_wakes: EnumFamily::new(Counter::new),
 			v5_pass: EnumFamily::new(|| Histogram::seconds(&SECONDS)),
 			v5_phase: EnumFamily::new(|| Histogram::seconds(&SECONDS)),
 			v5_connections_loaded: Gauge::new(),
@@ -443,6 +458,18 @@ impl SyncMetrics {
 	#[inline]
 	/// Counts why a long poll that waits through the sync journal ended.
 	pub fn wait_woken(&self, reason: WakeReason) { self.wait_wakes.get(reason).inc(); }
+
+	#[inline]
+	/// Counts the verdict of one shadow comparison of a sliding sync wait on the
+	/// sync journal with the database watchers, at a stage of the request.
+	pub fn v5_wait_verified(&self, stage: WaitStage, verdict: Verdict) {
+		self.v5_wait_verify.get((stage, verdict)).inc();
+	}
+
+	#[inline]
+	/// Counts why a sliding sync long poll that waits through the sync journal
+	/// ended.
+	pub fn v5_wait_woken(&self, reason: WakeReason) { self.v5_wait_wakes.get(reason).inc(); }
 
 	#[inline]
 	/// Counts a request as waiting for activity until the guard is dropped.
@@ -590,6 +617,19 @@ impl SyncMetrics {
 	/// Returns the number of long polls that ended for a reason.
 	pub fn wait_woken_total(&self, reason: WakeReason) -> u64 {
 		self.wait_wakes.get(reason).get()
+	}
+
+	#[must_use]
+	/// Returns the number of shadow verdicts of sliding sync waits counted for a
+	/// stage and a verdict.
+	pub fn v5_wait_verified_total(&self, stage: WaitStage, verdict: Verdict) -> u64 {
+		self.v5_wait_verify.get((stage, verdict)).get()
+	}
+
+	#[must_use]
+	/// Returns the number of sliding sync long polls that ended for a reason.
+	pub fn v5_wait_woken_total(&self, reason: WakeReason) -> u64 {
+		self.v5_wait_wakes.get(reason).get()
 	}
 
 	#[must_use]
@@ -805,6 +845,18 @@ impl SyncMetrics {
 			"Why a long poll that waits through the sync journal ended, by reason.",
 			&self.wait_wakes,
 		);
+		w.metric(
+			"tuwunel_sync_v5_wait_verify_total",
+			"Verdicts of the shadow comparison of the sync journal with the database watchers \
+			 for sliding sync, by stage and verdict; miss means the journal would have let a \
+			 long poll sleep through a change.",
+			&self.v5_wait_verify,
+		);
+		w.metric(
+			"tuwunel_sync_v5_wait_wakes_total",
+			"Why a sliding sync long poll that waits through the sync journal ended, by reason.",
+			&self.v5_wait_wakes,
+		);
 	}
 
 	pub(super) fn series(&self) -> usize {
@@ -832,6 +884,8 @@ impl SyncMetrics {
 			self.wait_verify.series(),
 			self.wait_wakes.series(),
 			self.long_polls.series(),
+			self.v5_wait_verify.series(),
+			self.v5_wait_wakes.series(),
 			self.v5_pass.series(),
 			self.v5_phase.series(),
 			self.v5_connections_loaded.series(),

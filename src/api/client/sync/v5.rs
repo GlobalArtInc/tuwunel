@@ -1,5 +1,6 @@
 mod extensions;
 mod filter;
+mod journal;
 mod range;
 mod rooms;
 mod selector;
@@ -24,7 +25,7 @@ use ruma::{
 	serde::Raw,
 };
 use serde::Deserialize;
-use tokio::{sync::Notify, time::timeout_at};
+use tokio::sync::Notify;
 use tuwunel_core::{
 	Err, Result, debug,
 	debug::INFO_SPAN_LEVEL,
@@ -52,6 +53,7 @@ use self::{
 		acknowledge_to_device, apply_profiles, apply_ranges, check_to_device,
 		handle as handle_extensions, to_device_pending,
 	},
+	journal::{Ended, Wait, verify_timeout, verify_woken, wait_for_change},
 	range::collect as collect_ranges,
 	selector::selector,
 };
@@ -227,12 +229,18 @@ pub(crate) async fn sync_events_v5_route(
 	};
 
 	let stop_at = poll_deadline(timeout);
+	let mut woke_after: Option<u64> = None;
 
 	for woken in once(false).chain(repeat(true)) {
 		debug_assert!(
 			conn.globalsince <= conn.next_batch,
 			"since should not be greater than next_batch."
 		);
+
+		let wait = Wait::current(services);
+		if wait != Wait::Verify {
+			woke_after = None;
+		}
 
 		let pass = registry.map(|registry| {
 			registry
@@ -241,14 +249,29 @@ pub(crate) async fn sync_events_v5_route(
 		});
 
 		let window;
-		let watch_phase = registry.map(|registry| registry.sync.v5_phase(V5Phase::Watch));
-		let watchers = services
-			.sync
-			.watch(sender_user, sender_device, services.state_cache.rooms_joined(sender_user))
-			.await;
+		let watch_phase = registry
+			.filter(|_| wait.registers())
+			.map(|registry| registry.sync.v5_phase(V5Phase::Watch));
+
+		let watchers = if wait.registers() {
+			Some(
+				services
+					.sync
+					.watch(
+						sender_user,
+						sender_device,
+						services.state_cache.rooms_joined(sender_user),
+					)
+					.await,
+			)
+		} else {
+			None
+		};
+
 		drop(watch_phase);
 
 		conn.next_batch = services.globals.wait_pending().await?;
+		let next_batch = conn.next_batch;
 		let direct_rooms = services
 			.account_data
 			.direct_rooms(sender_user)
@@ -283,12 +306,26 @@ pub(crate) async fn sync_events_v5_route(
 
 			response.extensions = extensions.into_response(&response.rooms);
 
+			if let Some(woke_after) = woke_after.take() {
+				verify_woken(
+					services,
+					sender_user,
+					sender_device,
+					(woke_after, next_batch),
+					Some(&mut response),
+				)
+				.await;
+			}
+
 			if !is_empty_response(&mut response, keys_answer) {
 				drop(ranges_phase);
 				drop(pass);
 
 				return respond(services, (&conn_key, &conn_val), &conn, response).await;
 			}
+		} else if let Some(woke_after) = woke_after.take() {
+			verify_woken(services, sender_user, sender_device, (woke_after, next_batch), None)
+				.await;
 		}
 
 		drop(pass);
@@ -297,12 +334,29 @@ pub(crate) async fn sync_events_v5_route(
 			let _long_poll = long_poll(services, Api::V5);
 
 			tokio::select! {
-				() = interrupted.notified() => true,
-				watch = timeout_at(stop_at, watchers) => watch.is_err(),
+				() = interrupted.notified() => Ended::Stopped,
+				ended = wait_for_change(
+					services,
+					sender_user,
+					sender_device,
+					next_batch,
+					stop_at,
+					watchers,
+				) => ended,
 			}
 		};
 
-		if timeout == 0 || services.server.is_stopping() || waiter().await {
+		let ended = if timeout == 0 || services.server.is_stopping() {
+			Ended::Stopped
+		} else {
+			waiter().await
+		};
+
+		if ended == Ended::TimedOut && wait == Wait::Verify {
+			verify_timeout(services, sender_user, sender_device, next_batch).await;
+		}
+
+		if ended != Ended::Woken {
 			return respond(services, (&conn_key, &conn_val), &conn, response).await;
 		}
 
@@ -315,6 +369,7 @@ pub(crate) async fn sync_events_v5_route(
 		);
 
 		conn.globalsince = conn.next_batch;
+		woke_after = (wait == Wait::Verify).then_some(next_batch);
 	}
 
 	unreachable!("a long poll has no last pass")
