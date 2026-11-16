@@ -38,6 +38,11 @@ pub(crate) async fn join_room_by_id_route(
 
 	services
 		.membership
+		.check_join_allowed(sender_user, room_id, body.appservice_info.is_some())
+		.await?;
+
+	services
+		.membership
 		.check_extra_content(sender_user, room_id, extra_content.as_ref())
 		.await?;
 
@@ -105,6 +110,11 @@ pub(crate) async fn join_room_by_id_or_alias_route(
 	services
 		.membership
 		.check_room_known(sender_user, &room_id, Some(&body.room_id_or_alias), &servers)
+		.await?;
+
+	services
+		.membership
+		.check_join_allowed(sender_user, &room_id, appservice_info.is_some())
 		.await?;
 
 	services

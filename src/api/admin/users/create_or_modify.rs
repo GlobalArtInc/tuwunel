@@ -164,9 +164,14 @@ async fn write_credentials(
 	let user_id = &body.user_id;
 
 	if created {
+		let password = body
+			.password
+			.as_deref()
+			.or_else(|| (body.deactivated != Some(true)).then_some(PASSWORD_SENTINEL));
+
 		return services
 			.users
-			.create(user_id, body.password.as_deref(), None)
+			.create(user_id, password, None)
 			.await;
 	}
 

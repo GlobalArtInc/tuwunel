@@ -100,17 +100,8 @@ pub async fn join<'a>(
 
 	self.check_room_ban(sender_user, room_id).await?;
 
-	let user_is_guest = !is_appservice && self.services.users.is_guest(sender_user).await;
-
-	if user_is_guest
-		&& !self
-			.services
-			.state_accessor
-			.guest_can_join(room_id)
-			.await
-	{
-		return Err!(Request(Forbidden("Guests are not allowed to join this room")));
-	}
+	self.check_guest_join(sender_user, room_id, is_appservice)
+		.await?;
 
 	if self
 		.services
@@ -122,20 +113,8 @@ pub async fn join<'a>(
 		return Ok(());
 	}
 
-	// Resolved state can lag a federated re-invite; trust the invite index.
-	if self
-		.banned_from_resident_room(sender_user, room_id)
-		.await
-		&& self
-			.services
-			.state_cache
-			.is_invited(sender_user, room_id)
-			.await
-			.is_false()
-	{
-		debug_warn!(%sender_user, %room_id, "Banned user attempted to join.");
-		return Err!(Request(Forbidden("You are banned from the room.")));
-	}
+	self.check_member_ban(sender_user, room_id)
+		.await?;
 
 	match federation_lock {
 		| Some(federation_lock) if !self.is_local_join(room_id, &servers).await =>
@@ -178,6 +157,77 @@ pub async fn check_room_known(
 
 	self.refuse_unknown_local_room(sender_user, room_id, &servers)
 		.await
+}
+
+/// Refuses a join that no other server could admit.
+///
+/// The route retries a failed join on other servers, and a guest refused by
+/// the room's guest access or a user banned in a room this server resides in
+/// fails the same way on every attempt, so it is refused here before one is
+/// made. A member's join changes nothing, so it passes the member-ban check.
+#[implement(Service)]
+#[tracing::instrument(level = "debug", skip_all)]
+pub async fn check_join_allowed(
+	&self,
+	sender_user: &UserId,
+	room_id: &RoomId,
+	is_appservice: bool,
+) -> Result {
+	self.check_guest_join(sender_user, room_id, is_appservice)
+		.await?;
+
+	if self
+		.services
+		.state_cache
+		.is_joined(sender_user, room_id)
+		.await
+	{
+		return Ok(());
+	}
+
+	self.check_member_ban(sender_user, room_id).await
+}
+
+#[implement(Service)]
+async fn check_guest_join(
+	&self,
+	sender_user: &UserId,
+	room_id: &RoomId,
+	is_appservice: bool,
+) -> Result {
+	let user_is_guest = !is_appservice && self.services.users.is_guest(sender_user).await;
+
+	if user_is_guest
+		&& !self
+			.services
+			.state_accessor
+			.guest_can_join(room_id)
+			.await
+	{
+		return Err!(Request(Forbidden("Guests are not allowed to join this room")));
+	}
+
+	Ok(())
+}
+
+#[implement(Service)]
+async fn check_member_ban(&self, sender_user: &UserId, room_id: &RoomId) -> Result {
+	// Resolved state can lag a federated re-invite; trust the invite index.
+	if self
+		.banned_from_resident_room(sender_user, room_id)
+		.await
+		&& self
+			.services
+			.state_cache
+			.is_invited(sender_user, room_id)
+			.await
+			.is_false()
+	{
+		debug_warn!(%sender_user, %room_id, "Banned user attempted to join.");
+		return Err!(Request(Forbidden("You are banned from the room.")));
+	}
+
+	Ok(())
 }
 
 /// Refuses `/join` extras that a join would refuse once it is under way.
