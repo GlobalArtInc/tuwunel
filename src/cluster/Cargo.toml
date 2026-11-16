@@ -29,11 +29,11 @@ rand.workspace = true
 rust-rocksdb.workspace = true
 serde.workspace = true
 tokio.workspace = true
+tuwunel-core.workspace = true
 tuwunel-database.workspace = true
 
 [dev-dependencies]
 tracing.workspace = true
-tuwunel-core.workspace = true
 
 [lints]
 workspace = true

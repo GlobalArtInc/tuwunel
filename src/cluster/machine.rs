@@ -11,6 +11,13 @@
 //! the format version, [`MARKER_VERSION`]; the rest is the postcard encoding of
 //! the pair of the applied log id and the membership in force at that position.
 //! Both are needed to answer `applied_state` after a restart.
+//!
+//! With a [`SnapshotStore`] attached the machine also builds, serves and
+//! installs snapshots of the database; the layout of the snapshots and the
+//! replacement of the database are described with [`SnapshotStore`].
+//! Installing replaces the database of the machine by a new one, so the machine
+//! hands out its database by reference and not by clone, and the runtime reads
+//! it back with [`Machine::database`].
 
 #[cfg(test)]
 mod tests;
@@ -22,17 +29,21 @@ use openraft::{
 	OptionalSend, StoredMembership,
 	entry::RaftEntry,
 	impls::EntryPayload,
-	storage::{EntryResponder, RaftSnapshotBuilder, RaftStateMachine},
+	storage::{EntryResponder, RaftStateMachine},
 	type_config::alias::{
 		EntryPayloadOf, LogIdOf, SnapshotMetaOf, SnapshotOf, StoredMembershipOf,
 	},
 };
-use tokio::sync::watch;
+use tokio::sync::{RwLock, watch};
 use tuwunel_database::{Database, Role};
 
 use crate::{
+	snapshot::{
+		SnapshotDir, SnapshotStore, Snapshots,
+		replace::{Closed, Pending},
+	},
 	types::{Request, TypeConfig},
-	util::blocking,
+	util::{blocking, invalid},
 };
 
 /// Format version of the position marker, its first byte.
@@ -47,19 +58,25 @@ type Applied = (Option<LogIdOf<TypeConfig>>, StoredMembershipOf<TypeConfig>);
 /// from anywhere else on a follower, and its role must not change while an
 /// apply runs.
 ///
-/// Snapshots are not implemented yet. A planned snapshot is deferred, so the
-/// Raft core carries on; a forced one, which a lagging follower or a restart
-/// after a purge would need, fails with an error. Until snapshots exist the
-/// cluster runtime still runs Raft with `SnapshotPolicy::Never`.
+/// Snapshots need a [`SnapshotStore`], attached with
+/// [`Machine::with_snapshots`]. Without one a planned snapshot is deferred, so
+/// the Raft core carries on, and a forced one, which a lagging follower or a
+/// restart after a purge would need, fails with an error.
+///
+/// Installing a snapshot closes the database and opens a new one in its place.
+/// That works only while the machine is the sole owner of the database. If
+/// something else still holds it, the installation stops after it has stored
+/// the replace marker and fails; Raft treats that as fatal, the process ends,
+/// and the replacement is finished at the next start by
+/// [`SnapshotStore::open_database`]. A machine whose installation failed after
+/// the database was closed has no database any more, and every call on it fails.
 pub struct Machine {
-	db: Arc<Database>,
+	db: Option<Arc<Database>>,
 	committed: watch::Sender<u64>,
+	applied: Option<Applied>,
+	snapshots: Option<SnapshotStore>,
+	gate: Arc<RwLock<()>>,
 }
-
-/// Snapshot builder of the state machine until it can snapshot: every build
-/// fails.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Snapshots;
 
 impl Machine {
 	/// Creates the state machine over `db`.
@@ -67,14 +84,43 @@ impl Machine {
 	/// `committed` is the cluster-confirmed database sequence of a leader. An
 	/// entry the leader captured itself moves it up to the sequence the entry
 	/// ends at, and it never moves down. The barrier of the leader waits on the
-	/// receiving side. The sender is not touched on a follower.
+	/// receiving side, and so does a snapshot of the leader. The sender is not
+	/// touched on a follower.
 	#[must_use]
 	pub fn new(db: Arc<Database>, committed: watch::Sender<u64>) -> Self {
-		Self { db, committed }
+		Self {
+			db: Some(db),
+			committed,
+			applied: None,
+			snapshots: None,
+			gate: Arc::new(RwLock::new(())),
+		}
+	}
+
+	/// Lets the machine build, serve and install snapshots through `store`.
+	#[must_use]
+	pub fn with_snapshots(mut self, store: SnapshotStore) -> Self {
+		self.snapshots = Some(store);
+
+		self
+	}
+
+	/// The database the machine applies to.
+	///
+	/// It changes when a snapshot is installed, so do not keep the handle: a
+	/// copy that is still held then stops the installation. `None` after an
+	/// installation failed past the point where the old database was closed.
+	#[must_use]
+	pub fn database(&self) -> Option<&Arc<Database>> { self.db.as_ref() }
+
+	fn db(&self) -> io::Result<&Arc<Database>> { self.db.as_ref().ok_or_else(closed) }
+
+	fn store(&self) -> io::Result<&SnapshotStore> {
+		self.snapshots.as_ref().ok_or_else(unavailable)
 	}
 
 	async fn stored(&self) -> io::Result<Applied> {
-		let db = Arc::clone(&self.db);
+		let db = Arc::clone(self.db()?);
 
 		blocking(move || {
 			match db
@@ -95,7 +141,8 @@ impl Machine {
 		payload: &EntryPayloadOf<TypeConfig>,
 	) -> io::Result<()> {
 		match payload {
-			| EntryPayload::Normal(Request(entry)) if entry.origin == self.db.engine.origin() =>
+			| EntryPayload::Normal(Request(entry))
+				if entry.origin == self.db()?.engine.origin() =>
 				self.confirm(&entry.seq),
 			| EntryPayload::Normal(Request(entry)) => Err(io::Error::other(format!(
 				"leader cannot apply entry {log_id} of origin {:016x}: only its own entries are \
@@ -107,7 +154,7 @@ impl Machine {
 	}
 
 	fn confirm(&self, seq: &Range<u64>) -> io::Result<()> {
-		let head = self.db.engine.current_sequence();
+		let head = self.db()?.engine.current_sequence();
 		if seq.start > seq.end || seq.end > head {
 			return Err(invalid(format!(
 				"own entry covers sequence {}..{} of a database at {head}",
@@ -141,7 +188,7 @@ impl Machine {
 		};
 
 		let marker = encode_marker(&log_id, &membership)?;
-		let db = Arc::clone(&self.db);
+		let db = Arc::clone(self.db()?);
 
 		blocking(move || {
 			db.engine
@@ -152,45 +199,100 @@ impl Machine {
 
 		Ok(membership)
 	}
-}
 
-impl RaftSnapshotBuilder<TypeConfig> for Snapshots {
-	type SnapshotData = Vec<u8>;
+	/// The position and membership entries are applied on top of: the one the
+	/// leader keeps in memory, or the marker of the database.
+	async fn position(&self) -> io::Result<Applied> {
+		match &self.applied {
+			| Some(applied) if self.db()?.engine.role() == Role::Leader => Ok(applied.clone()),
+			| _ => self.stored().await,
+		}
+	}
 
-	async fn build_snapshot(&mut self) -> io::Result<SnapshotOf<TypeConfig, Vec<u8>>> {
-		Err(unavailable())
+	async fn builder(&self, force: bool) -> Option<Snapshots> {
+		let Some(store) = self.snapshots.clone() else {
+			return force.then(Snapshots::disabled);
+		};
+
+		let gate = Arc::clone(&self.gate);
+		let permit = match force {
+			| true => gate.read_owned().await,
+			| false => gate.try_read_owned().ok()?,
+		};
+
+		if !force && store.is_building() {
+			return None;
+		}
+
+		let applied = match self.applied.clone() {
+			| Some(applied) => Ok(applied),
+			| None => self.stored().await,
+		};
+
+		let ready = match (applied, self.db()) {
+			| (Err(error), _) | (_, Err(error)) => Err(error),
+			| (Ok((None, _)), _) if !force => return None,
+			| (Ok((None, _)), _) => Err(invalid(
+				"no log entry is applied yet, so there is nothing to snapshot".to_owned(),
+			)),
+			| (Ok((Some(log_id), membership)), Ok(db)) =>
+				Ok((Arc::clone(db), log_id, membership)),
+		};
+
+		Some(match ready {
+			| Err(error) => Snapshots::failed(error),
+			| Ok((db, log_id, membership)) => Snapshots::ready(
+				db,
+				store,
+				(log_id, membership),
+				self.committed.subscribe(),
+				permit,
+			),
+		})
 	}
 }
 
 impl RaftStateMachine<TypeConfig> for Machine {
 	type SnapshotBuilder = Snapshots;
-	type SnapshotData = Vec<u8>;
+	type SnapshotData = SnapshotDir;
 
-	async fn applied_state(&mut self) -> io::Result<Applied> { self.stored().await }
+	async fn applied_state(&mut self) -> io::Result<Applied> {
+		let applied = self.stored().await?;
+		self.applied = Some(applied.clone());
+
+		Ok(applied)
+	}
 
 	async fn apply<Strm>(&mut self, mut entries: Strm) -> io::Result<()>
 	where
 		Strm: Stream<Item = io::Result<EntryResponder<TypeConfig>>> + Unpin + OptionalSend,
 	{
-		let mut membership: Option<StoredMembershipOf<TypeConfig>> = None;
+		let mut position: Option<Applied> = None;
 
 		while let Some(item) = entries.next().await {
 			let (entry, responder) = item?;
 			let log_id = entry.log_id();
+			let current = match position.take() {
+				| Some(current) => current,
+				| None => self.position().await?,
+			};
 
-			if self.db.engine.role() == Role::Leader {
+			let membership = if self.db()?.engine.role() == Role::Leader {
 				self.lead(&log_id, &entry.payload)?;
-			} else {
-				let current = match membership.take() {
-					| Some(current) => current,
-					| None => self.stored().await?.1,
-				};
 
-				membership = Some(
-					self.follow(log_id, entry.payload, current)
-						.await?,
-				);
-			}
+				match entry.payload {
+					| EntryPayload::Membership(members) =>
+						StoredMembership::new(Some(log_id), members),
+					| EntryPayload::Normal(_) | EntryPayload::Blank => current.1,
+				}
+			} else {
+				self.follow(log_id, entry.payload, current.1)
+					.await?
+			};
+
+			let applied = (Some(log_id), membership);
+			self.applied = Some(applied.clone());
+			position = Some(applied);
 
 			if let Some(responder) = responder {
 				responder.send(());
@@ -204,23 +306,76 @@ impl RaftStateMachine<TypeConfig> for Machine {
 		&mut self,
 		force: bool,
 	) -> Option<Self::SnapshotBuilder> {
-		force.then_some(Snapshots)
+		self.builder(force).await
 	}
 
-	async fn get_snapshot_builder(&mut self) -> Self::SnapshotBuilder { Snapshots }
+	async fn get_snapshot_builder(&mut self) -> Self::SnapshotBuilder {
+		self.builder(true)
+			.await
+			.unwrap_or_else(Snapshots::disabled)
+	}
 
 	async fn install_snapshot(
 		&mut self,
-		_meta: &SnapshotMetaOf<TypeConfig>,
-		_snapshot: Vec<u8>,
+		meta: &SnapshotMetaOf<TypeConfig>,
+		snapshot: SnapshotDir,
 	) -> io::Result<()> {
-		Err(unavailable())
+		let store = self.store()?.clone();
+		let (Some(log_id), membership) = (meta.last_log_id, &meta.last_membership) else {
+			return Err(io::Error::new(
+				io::ErrorKind::InvalidInput,
+				"a snapshot that names no log entry cannot be installed",
+			));
+		};
+
+		let marker = encode_marker(&log_id, membership)?;
+		let gate = Arc::clone(&self.gate);
+		let _exclusive = gate.write().await;
+
+		let role = self.db()?.engine.role();
+		if role != Role::Follower {
+			return Err(io::Error::new(
+				io::ErrorKind::InvalidInput,
+				format!("a snapshot is installed by a follower, not a {role:?}"),
+			));
+		}
+
+		let staged = snapshot.clone();
+		let adopting = store.clone();
+		let adopted_marker = marker.clone();
+		let name = blocking(move || adopting.adopt(&staged, &adopted_marker)).await?;
+
+		let pending = Pending { snapshot: name, marker };
+		store.begin(&pending).await?;
+
+		let db = self.db.take().ok_or_else(closed)?;
+		match SnapshotStore::close(db).await? {
+			| Closed::Shared(db) => {
+				self.db = Some(db);
+
+				Err(io::Error::new(
+					io::ErrorKind::ResourceBusy,
+					"the database is still in use elsewhere, so it cannot be replaced in this \
+					 process; the replacement is stored and the next start finishes it",
+				))
+			},
+			| Closed::Done => {
+				let marker = pending.marker.clone();
+				self.db = Some(store.finish(pending).await?);
+				self.applied = Some(decode_marker(&marker)?);
+
+				Ok(())
+			},
+		}
 	}
 
 	async fn get_current_snapshot(
 		&mut self,
-	) -> io::Result<Option<SnapshotOf<TypeConfig, Vec<u8>>>> {
-		Ok(None)
+	) -> io::Result<Option<SnapshotOf<TypeConfig, SnapshotDir>>> {
+		match &self.snapshots {
+			| Some(store) => store.current().await,
+			| None => Ok(None),
+		}
 	}
 }
 
@@ -273,7 +428,9 @@ pub fn decode_marker(
 	Ok((Some(applied), membership))
 }
 
-fn invalid(message: String) -> io::Error { io::Error::new(io::ErrorKind::InvalidData, message) }
+fn closed() -> io::Error {
+	io::Error::other("the database was closed by an installation that did not finish")
+}
 
 fn unavailable() -> io::Error {
 	io::Error::new(io::ErrorKind::Unsupported, "snapshots are not available yet")

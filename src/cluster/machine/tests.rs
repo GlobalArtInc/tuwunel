@@ -32,7 +32,7 @@ use tuwunel_core::{
 use tuwunel_database::{Database, Entry, Role};
 
 use super::{Machine, decode_marker, encode_marker};
-use crate::{LogStore, Node, Request, TypeConfig};
+use crate::{LogStore, Node, Request, SnapshotDir, SnapshotFile, TypeConfig};
 
 const MAP: &str = "alias_roomid";
 
@@ -576,6 +576,14 @@ async fn a_damaged_marker_is_an_error_and_not_an_empty_position() -> Result {
 	Ok(())
 }
 
+fn scratch() -> SnapshotDir {
+	SnapshotDir::new(PathBuf::from("/nowhere"), vec![SnapshotFile {
+		name: "CURRENT".to_owned(),
+		len: 1,
+	}])
+	.expect("the description is valid")
+}
+
 #[tokio::test]
 async fn snapshot_methods_fail_with_a_clear_error() -> Result {
 	let dir = Dir::new();
@@ -591,7 +599,7 @@ async fn snapshot_methods_fail_with_a_clear_error() -> Result {
 			.map(drop)
 			.expect_err("build"),
 		applier
-			.install_snapshot(&SnapshotMeta::default(), Vec::new())
+			.install_snapshot(&SnapshotMeta::default(), scratch())
 			.await
 			.expect_err("install"),
 	];

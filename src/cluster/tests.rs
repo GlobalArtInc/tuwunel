@@ -588,6 +588,40 @@ async fn a_log_emptied_by_a_purge_continues_the_purge_position() {
 }
 
 #[tokio::test]
+async fn a_purge_past_the_end_of_the_log_empties_it_and_the_log_goes_on_after_the_position() {
+	let dir = TempDir::new();
+	let mut store = open(&dir).await;
+	append(&mut store, (1..=3).map(|index| blank(1, index))).await;
+
+	store
+		.purge(log_id(1, 9))
+		.await
+		.expect("a purge may go past the last entry");
+
+	let state = store.get_log_state().await.expect("log state");
+	assert_eq!(state.last_purged_log_id, Some(log_id(1, 9)));
+	assert_eq!(
+		state.last_log_id,
+		Some(log_id(1, 9)),
+		"the purge position is the end of the log"
+	);
+	assert!(indexes(&mut store, 0..20).await.is_empty(), "no entry is left");
+
+	for first in [4, 9] {
+		store
+			.append(vec![blank(2, first)], IOFlushed::noop())
+			.await
+			.expect_err("an append does not reach back into the purged part");
+	}
+
+	append(&mut store, [blank(2, 10)]).await;
+	drop(store);
+
+	let mut store = open(&dir).await;
+	assert_eq!(indexes(&mut store, 0..20).await, [10], "the log goes on after the position");
+}
+
+#[tokio::test]
 async fn a_hole_at_the_edge_of_a_read_range_is_corruption() {
 	let beginning = TempDir::new();
 	let mut store = open(&beginning).await;

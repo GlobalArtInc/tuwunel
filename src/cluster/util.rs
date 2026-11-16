@@ -12,3 +12,8 @@ where
 		.await
 		.map_err(io::Error::other)?
 }
+
+/// An error for data that is present and wrong.
+pub(crate) fn invalid(message: String) -> io::Error {
+	io::Error::new(io::ErrorKind::InvalidData, message)
+}
