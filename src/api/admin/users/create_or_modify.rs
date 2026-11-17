@@ -2,7 +2,9 @@ use std::collections::BTreeSet;
 
 use axum::extract::State;
 use futures::StreamExt;
-use ruma::{MilliSecondsSinceUnixEpoch, UserId, profile::ProfileFieldName, thirdparty::Medium};
+use ruma::{
+	JsOption, MilliSecondsSinceUnixEpoch, UserId, profile::ProfileFieldName, thirdparty::Medium,
+};
 use synapse_admin_api::users::create_or_modify::v2::{
 	self as create_or_modify, ThirdPartyIdentifier,
 };
@@ -26,8 +28,8 @@ type ProfileWrites = ArrayVec<ProfileValue, 2>;
 
 /// # `PUT /_synapse/admin/v2/users/{user_id}`
 ///
-/// Creates a local account or modifies an existing one. `user_type`,
-/// `external_ids` and `approved` are accepted and ignored (not persisted).
+/// Creates a local account or modifies an existing one. `external_ids` and
+/// `approved` are accepted and ignored (not persisted).
 pub(crate) async fn admin_create_or_modify_route(
 	State(services): State<crate::State>,
 	body: Ruma<create_or_modify::Request>,
@@ -112,6 +114,12 @@ pub(crate) async fn admin_create_or_modify_route(
 		| None => {},
 	}
 
+	match user_type_change(&body.user_type) {
+		| UserTypeChange::Keep => {},
+		| UserTypeChange::Clear => services.users.clear_user_type(user_id),
+		| UserTypeChange::Set(user_type) => services.users.set_user_type(user_id, &user_type),
+	}
+
 	if let Some(emails) = emails {
 		replace_emails(services, user_id, &emails).await;
 	}
@@ -130,6 +138,22 @@ fn canonical_emails(threepids: &[ThirdPartyIdentifier]) -> Result<Emails> {
 		.filter(|tpid| tpid.medium == Medium::Email)
 		.map(|tpid| canonicalize_email(&tpid.address))
 		.collect()
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum UserTypeChange {
+	Keep,
+	Clear,
+	Set(String),
+}
+
+fn user_type_change(user_type: &JsOption<String>) -> UserTypeChange {
+	match user_type {
+		| JsOption::Undefined => UserTypeChange::Keep,
+		| JsOption::Null => UserTypeChange::Clear,
+		| JsOption::Some(user_type) if user_type.is_empty() => UserTypeChange::Clear,
+		| JsOption::Some(user_type) => UserTypeChange::Set(user_type.clone()),
+	}
 }
 
 fn changes_access(body: &create_or_modify::Request) -> bool {
@@ -222,4 +246,22 @@ async fn replace_emails(services: crate::State, user_id: &UserId, desired: &Emai
 				.put_binding(user_id, address, Medium::Email, now, now)
 		})
 		.await;
+}
+
+#[cfg(test)]
+mod tests {
+	use ruma::JsOption;
+
+	use super::{UserTypeChange, user_type_change};
+
+	#[test]
+	fn user_type_field_maps_to_a_change() {
+		assert_eq!(user_type_change(&JsOption::Undefined), UserTypeChange::Keep);
+		assert_eq!(user_type_change(&JsOption::Null), UserTypeChange::Clear);
+		assert_eq!(user_type_change(&JsOption::Some(String::new())), UserTypeChange::Clear);
+		assert_eq!(
+			user_type_change(&JsOption::Some("bot".to_owned())),
+			UserTypeChange::Set("bot".to_owned())
+		);
+	}
 }

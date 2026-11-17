@@ -59,6 +59,7 @@ struct ListParams<'a> {
 	admins: Option<bool>,
 	locked: bool,
 	deactivated: DeactivatedFilter,
+	excluded_types: &'a [String],
 	dir: Direction,
 }
 
@@ -77,6 +78,7 @@ struct ListKey {
 	admins: Option<bool>,
 	locked: bool,
 	deactivated: DeactivatedFilter,
+	excluded_types: Vec<String>,
 }
 
 struct ListCache {
@@ -93,6 +95,7 @@ impl ListKey {
 			admins: params.admins,
 			locked: params.locked,
 			deactivated: params.deactivated,
+			excluded_types: params.excluded_types.to_vec(),
 		}
 	}
 }
@@ -155,6 +158,7 @@ pub(crate) async fn admin_list_users_v2_route(
 		admins: body.admins,
 		locked: body.locked,
 		deactivated,
+		excluded_types: &body.not_user_type,
 		dir: body.dir.unwrap_or(Direction::Forward),
 	};
 
@@ -184,6 +188,7 @@ pub(crate) async fn admin_list_users_v3_route(
 		admins: body.admins,
 		locked: body.locked,
 		deactivated,
+		excluded_types: &body.not_user_type,
 		dir: body.dir.unwrap_or(Direction::Forward),
 	};
 
@@ -227,13 +232,23 @@ async fn list_users(
 }
 
 async fn matching_names(services: crate::State, params: &ListParams<'_>) -> Vec<String> {
-	let mut names: Vec<String> = services
-		.users
-		.stream()
-		.ready_filter(|user_id| services.globals.user_is_local(user_id))
-		.map(ToString::to_string)
-		.collect()
-		.await;
+	let mut names: Vec<String> = if walks_typed_only(params.excluded_types) {
+		services
+			.users
+			.typed()
+			.ready_filter(|user_id| services.globals.user_is_local(user_id))
+			.map(ToString::to_string)
+			.collect()
+			.await
+	} else {
+		services
+			.users
+			.stream()
+			.ready_filter(|user_id| services.globals.user_is_local(user_id))
+			.map(ToString::to_string)
+			.collect()
+			.await
+	};
 
 	order_names(&mut names, params.dir);
 
@@ -256,6 +271,16 @@ fn order_names(names: &mut [String], dir: Direction) {
 	if matches!(dir, Direction::Backward) {
 		names.reverse();
 	}
+}
+
+fn walks_typed_only(excluded: &[String]) -> bool { excluded.iter().any(String::is_empty) }
+
+fn type_allowed(user_type: Option<&str>, excluded: &[String]) -> bool {
+	let user_type = user_type.unwrap_or_default();
+
+	!excluded
+		.iter()
+		.any(|excluded| excluded == user_type)
 }
 
 fn page_window(matched: usize, from: usize, limit: usize) -> (Range<usize>, Option<String>) {
@@ -291,6 +316,14 @@ async fn user_matches(services: crate::State, name: &str, params: &ListParams<'_
 
 	if !params.locked && services.users.is_locked(&user_id).await {
 		return false;
+	}
+
+	if !params.excluded_types.is_empty() {
+		let user_type = services.users.user_type(&user_id).await;
+
+		if !type_allowed(user_type.as_deref(), params.excluded_types) {
+			return false;
+		}
 	}
 
 	if params.deactivated.needs_lookup() {
@@ -343,6 +376,8 @@ async fn user_minor_details(services: crate::State, name: &str) -> Option<UserMi
 
 	let erased = services.users.is_erased(&user_id).await;
 
+	let user_type = services.users.user_type(&user_id).await;
+
 	let last_seen_ts = services
 		.users
 		.all_devices_metadata(&user_id)
@@ -357,6 +392,7 @@ async fn user_minor_details(services: crate::State, name: &str) -> Option<UserMi
 		locked,
 		erased,
 		last_seen_ts,
+		user_type,
 		// tuwunel has no creation timestamp; emit a 0 sentinel (strict clients reject null).
 		creation_ts: Some(MilliSecondsSinceUnixEpoch(UInt::from(0_u32))),
 		..UserMinorDetails::new(name.to_owned())
@@ -374,6 +410,7 @@ mod tests {
 
 	use super::{
 		DeactivatedFilter, LIST_KEYS, LIST_TTL, ListCache, ListKey, order_names, page_window,
+		type_allowed, walks_typed_only,
 	};
 
 	#[test]
@@ -436,6 +473,35 @@ mod tests {
 		assert_eq!(keeps(DeactivatedFilter::Exclude), (true, false, true));
 	}
 
+	#[test]
+	fn type_filter_excludes_the_listed_types() {
+		let none: &[String] = &[];
+		assert!(type_allowed(None, none));
+		assert!(type_allowed(Some("bot"), none));
+
+		let untyped = [String::new()];
+		assert!(!type_allowed(None, &untyped));
+		assert!(type_allowed(Some("bot"), &untyped));
+
+		let bots = ["bot".to_owned()];
+		assert!(type_allowed(None, &bots));
+		assert!(!type_allowed(Some("bot"), &bots));
+		assert!(type_allowed(Some("x"), &bots));
+
+		let untyped_and_bots = [String::new(), "bot".to_owned()];
+		assert!(!type_allowed(None, &untyped_and_bots));
+		assert!(!type_allowed(Some("bot"), &untyped_and_bots));
+		assert!(type_allowed(Some("x"), &untyped_and_bots));
+	}
+
+	#[test]
+	fn typed_walk_applies_only_when_untyped_users_are_excluded() {
+		assert!(walks_typed_only(&[String::new()]));
+		assert!(walks_typed_only(&["x".to_owned(), String::new()]));
+		assert!(!walks_typed_only(&["bot".to_owned()]));
+		assert!(!walks_typed_only(&[]));
+	}
+
 	fn key(name: &str) -> ListKey {
 		ListKey {
 			owner: 1,
@@ -445,6 +511,7 @@ mod tests {
 			admins: None,
 			locked: false,
 			deactivated: DeactivatedFilter::Exclude,
+			excluded_types: Vec::new(),
 		}
 	}
 
@@ -510,6 +577,10 @@ mod tests {
 			ListKey { locked: true, ..base.clone() },
 			ListKey {
 				deactivated: DeactivatedFilter::Only,
+				..base.clone()
+			},
+			ListKey {
+				excluded_types: vec![String::new()],
 				..base.clone()
 			},
 		];

@@ -523,6 +523,47 @@ async fn device_removal_keeps_its_connections() -> Result {
 	Ok(())
 }
 
+#[tokio::test]
+async fn user_type_is_stored_listed_and_cleared() -> Result {
+	let Some(fixture) = fixture(Figment::new()).await? else {
+		return Ok(());
+	};
+
+	let users = &fixture.services.users;
+	let user_id = user_id!("@user-type:localhost");
+
+	users
+		.create(user_id, Some(OLD_PASSWORD), None)
+		.await?;
+
+	let typed: Vec<&UserId> = users.typed().collect().await;
+	assert_eq!(users.user_type(user_id).await, None);
+	assert!(!typed.contains(&user_id));
+
+	users.set_user_type(user_id, "bot");
+
+	let typed: Vec<&UserId> = users.typed().collect().await;
+	let all: Vec<&UserId> = users.stream().collect().await;
+	assert_eq!(users.user_type(user_id).await, Some("bot".to_owned()));
+	assert!(typed.contains(&user_id));
+	assert!(all.contains(&user_id));
+
+	users.set_user_type(user_id, "");
+
+	let typed: Vec<&UserId> = users.typed().collect().await;
+	assert_eq!(users.user_type(user_id).await, None);
+	assert!(!typed.contains(&user_id));
+
+	users.set_user_type(user_id, "bot");
+	users.clear_user_type(user_id);
+
+	let typed: Vec<&UserId> = users.typed().collect().await;
+	assert_eq!(users.user_type(user_id).await, None);
+	assert!(!typed.contains(&user_id));
+
+	Ok(())
+}
+
 fn key_pair(version: &str) -> Ed25519KeyPair {
 	Ed25519KeyPair::from_der(&Ed25519KeyPair::generate(), version.into())
 		.expect("generated key pair should parse")

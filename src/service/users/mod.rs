@@ -116,6 +116,7 @@ struct Data {
 	userid_selfsigningkeyid: Arc<Map>,
 	userid_suspended: Arc<Map>,
 	userid_usersigningkeyid: Arc<Map>,
+	userid_usertype: Arc<Map>,
 }
 
 impl crate::Service for Service {
@@ -157,6 +158,7 @@ impl crate::Service for Service {
 				userid_selfsigningkeyid: args.db["userid_selfsigningkeyid"].clone(),
 				userid_suspended: args.db["userid_suspended"].clone(),
 				userid_usersigningkeyid: args.db["userid_usersigningkeyid"].clone(),
+				userid_usertype: args.db["userid_usertype"].clone(),
 			},
 		}))
 	}
@@ -469,6 +471,25 @@ impl Service {
 
 	pub fn clear_locked(&self, user_id: &UserId) { self.db.userid_locked.remove(user_id); }
 
+	pub async fn user_type(&self, user_id: &UserId) -> Option<String> {
+		self.db
+			.userid_usertype
+			.get(user_id)
+			.await
+			.deserialized()
+			.ok()
+	}
+
+	pub fn set_user_type(&self, user_id: &UserId, user_type: &str) {
+		if user_type.is_empty() {
+			self.clear_user_type(user_id);
+		} else {
+			self.db.userid_usertype.insert(user_id, user_type);
+		}
+	}
+
+	pub fn clear_user_type(&self, user_id: &UserId) { self.db.userid_usertype.remove(user_id); }
+
 	/// Returns the number of users registered on this server.
 	#[inline]
 	pub async fn count(&self) -> usize { self.db.userid_password.count().await }
@@ -489,6 +510,10 @@ impl Service {
 	/// Returns an iterator over all users on this homeserver.
 	pub fn stream(&self) -> impl Stream<Item = &UserId> + Send {
 		self.db.userid_password.keys().ignore_err()
+	}
+
+	pub fn typed(&self) -> impl Stream<Item = &UserId> + Send {
+		self.db.userid_usertype.keys().ignore_err()
 	}
 
 	/// Returns a list of local users as list of usernames.

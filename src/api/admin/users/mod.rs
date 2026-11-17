@@ -51,7 +51,7 @@ const REDACT_USER_ACTION: &str = "redact_all_events";
 
 /// Assembles the Synapse `UserDetails` for a local user from the fields tuwunel
 /// persists. Fields tuwunel never stores (guest, shadow-banned, external IDs,
-/// user type, appservice, consent) are left at their absent defaults.
+/// appservice, consent) are left at their absent defaults.
 async fn user_details(services: crate::State, user_id: &UserId) -> UserDetails {
 	let displayname = services.profile.displayname(user_id).await.ok();
 
@@ -72,6 +72,8 @@ async fn user_details(services: crate::State, user_id: &UserId) -> UserDetails {
 	let locked = services.users.is_locked(user_id).await;
 	let suspended = services.users.is_suspended(user_id).await;
 	let erased = services.users.is_erased(user_id).await;
+
+	let user_type = services.users.user_type(user_id).await;
 
 	let threepids = services
 		.threepid
@@ -95,6 +97,7 @@ async fn user_details(services: crate::State, user_id: &UserId) -> UserDetails {
 		erased,
 		threepids,
 		last_seen_ts,
+		user_type,
 		// tuwunel has no creation timestamp; emit a 0 sentinel (strict clients reject null).
 		creation_ts: Some(SecondsSinceUnixEpoch(UInt::from(0_u32))),
 		..UserDetails::new(user_id.to_string())
